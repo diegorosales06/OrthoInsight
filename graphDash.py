@@ -39,8 +39,12 @@ CMD_INTERVAL                     = 0x44
 CMD_COEFF = (0x30, 0x32, 0x34, 0x36, 0x38, 0x3A)
 STT_STANDBY, STT_READY = 1, 3
 
-AXES   = ("Fx", "Fy", "Fz")
-COLORS = ("#e74c3c", "#2ecc71", "#3498db")  # red, green, blue
+FORCE_AXES   = ("Fx", "Fy", "Fz")
+FORCE_COLORS = ("#e74c3c", "#2ecc71", "#3498db")  # red, green, blue
+MOMENT_AXES   = ("Mx", "My", "Mz")
+MOMENT_COLORS = ("#e67e22", "#9b59b6", "#1abc9c")  # orange, purple, teal
+ALL_AXES = FORCE_AXES + MOMENT_AXES
+N_AXES = 6
 
 DEFAULT_RATE_HZ    = 20
 DEFAULT_WINDOW_S   = 10
@@ -98,11 +102,12 @@ class Sensor:
         self._cmd([CMD_START], 1)
         time.sleep(0.01)
 
-    def read_forces(self):
+    def read_all(self):
+        """Returns [Fx, Fy, Fz, Mx, My, Mz]."""
         r = self._cmd([CMD_DATA2], 21)
         adc = [s24(r[3+k*3 : 6+k*3]) for k in range(6)]
         out = []
-        for axis in range(3):
+        for axis in range(6):
             acc = sum(c * a for c, a in zip(self.coeff[axis], adc))
             out.append(int(acc / 2048) / 1000.0)
         return out
@@ -127,24 +132,24 @@ class DataStore:
         with self.lock:
             self.t = collections.deque(maxlen=MAX_BUFFER_SAMPLES)
             self.data = [
-                [collections.deque(maxlen=MAX_BUFFER_SAMPLES) for _ in AXES]
+                [collections.deque(maxlen=MAX_BUFFER_SAMPLES) for _ in range(N_AXES)]
                 for _ in range(self.n_cells)
             ]
 
-    def append(self, timestamp, all_forces):
+    def append(self, timestamp, all_readings):
         with self.lock:
             self.t.append(timestamp)
-            for ci, forces in enumerate(all_forces):
-                for ai, v in enumerate(forces):
+            for ci, vals in enumerate(all_readings):
+                for ai, v in enumerate(vals):
                     self.data[ci][ai].append(v)
 
     def get_cell(self, cell_idx, window_s=None):
         with self.lock:
             if len(self.t) == 0:
                 empty = np.array([])
-                return empty, [empty, empty, empty]
+                return empty, [empty] * N_AXES
             t = np.array(self.t)
-            arrs = [np.array(self.data[cell_idx][ai]) for ai in range(3)]
+            arrs = [np.array(self.data[cell_idx][ai]) for ai in range(N_AXES)]
 
         if window_s is not None and len(t) > 0:
             cutoff = t[-1] - window_s
@@ -175,13 +180,13 @@ class Sampler(threading.Thread):
                 time.sleep(0.05)
                 continue
             t0 = time.time()
-            forces = []
+            readings = []
             for c in self.cells:
                 try:
-                    forces.append(c.read_forces())
+                    readings.append(c.read_all())
                 except Exception:
-                    forces.append([0.0, 0.0, 0.0])
-            self.store.append(t0, forces)
+                    readings.append([0.0] * N_AXES)
+            self.store.append(t0, readings)
             elapsed = time.time() - t0
             period = 1.0 / self.rate_hz
             if elapsed < period:
@@ -194,40 +199,65 @@ class CellTab(QWidget):
         super().__init__()
         self.cell_idx = cell_idx
         self.store = store
-        self.offset = [0.0, 0.0, 0.0]
+        self.offset = [0.0] * N_AXES
         self.window_s = DEFAULT_WINDOW_S
         self.ma_n = 1  # 1 = no smoothing
 
         layout = QVBoxLayout()
         layout.setContentsMargins(10, 10, 10, 10)
 
-        # --- Plot ---
-        self.plot_widget = pg.PlotWidget()
-        self.plot_widget.setBackground("w")
-        self.plot_widget.setLabel("left", "Force (N)")
-        self.plot_widget.setLabel("bottom", "Time (s)")
-        self.plot_widget.addLegend()
-        self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
+        # --- Force plot ---
+        self.force_plot = pg.PlotWidget()
+        self.force_plot.setBackground("w")
+        self.force_plot.setLabel("left", "Force (N)")
+        self.force_plot.setLabel("bottom", "Time (s)")
+        self.force_plot.addLegend()
+        self.force_plot.showGrid(x=True, y=True, alpha=0.3)
 
-        self.curves = []
-        for i, axis in enumerate(AXES):
-            pen = pg.mkPen(color=COLORS[i], width=2)
-            curve = self.plot_widget.plot([], [], pen=pen, name=axis)
-            self.curves.append(curve)
+        self.force_curves = []
+        for i, axis in enumerate(FORCE_AXES):
+            pen = pg.mkPen(color=FORCE_COLORS[i], width=2)
+            curve = self.force_plot.plot([], [], pen=pen, name=axis)
+            self.force_curves.append(curve)
+        layout.addWidget(self.force_plot, 1)
 
-        layout.addWidget(self.plot_widget, 1)
-
-        # --- Current values ---
-        val_font = QFont(); val_font.setPointSize(14); val_font.setBold(True)
-        val_row = QHBoxLayout()
-        self.val_labels = []
-        for i, axis in enumerate(AXES):
+        # Force readouts
+        val_font = QFont(); val_font.setPointSize(12); val_font.setBold(True)
+        force_val_row = QHBoxLayout()
+        self.force_labels = []
+        for i, axis in enumerate(FORCE_AXES):
             lbl = QLabel(f"{axis}: +0.000 N")
             lbl.setFont(val_font)
-            lbl.setStyleSheet(f"color: {COLORS[i]};")
-            val_row.addWidget(lbl)
-            self.val_labels.append(lbl)
-        layout.addLayout(val_row)
+            lbl.setStyleSheet(f"color: {FORCE_COLORS[i]};")
+            force_val_row.addWidget(lbl)
+            self.force_labels.append(lbl)
+        layout.addLayout(force_val_row)
+
+        # --- Moment plot ---
+        self.moment_plot = pg.PlotWidget()
+        self.moment_plot.setBackground("w")
+        self.moment_plot.setLabel("left", "Moment (N·mm)")
+        self.moment_plot.setLabel("bottom", "Time (s)")
+        self.moment_plot.addLegend()
+        self.moment_plot.showGrid(x=True, y=True, alpha=0.3)
+
+        self.moment_curves = []
+        for i, axis in enumerate(MOMENT_AXES):
+            pen = pg.mkPen(color=MOMENT_COLORS[i], width=2)
+            curve = self.moment_plot.plot([], [], pen=pen, name=axis)
+            self.moment_curves.append(curve)
+        layout.addWidget(self.moment_plot, 1)
+
+        # Moment readouts
+        moment_val_row = QHBoxLayout()
+        self.moment_labels = []
+        for i, axis in enumerate(MOMENT_AXES):
+            lbl = QLabel(f"{axis}: +0.000 N·mm")
+            lbl.setFont(val_font)
+            lbl.setStyleSheet(f"color: {MOMENT_COLORS[i]};")
+            moment_val_row.addWidget(lbl)
+            self.moment_labels.append(lbl)
+        layout.addLayout(moment_val_row)
 
         # --- Tare controls ---
         btnf = QFont(); btnf.setPointSize(11)
@@ -243,7 +273,7 @@ class CellTab(QWidget):
         clear_btn.setMinimumHeight(36)
         clear_btn.clicked.connect(self.clear_tare)
 
-        self.offset_label = QLabel("offset: [0.000, 0.000, 0.000]")
+        self.offset_label = QLabel("offset: F[0.000, 0.000, 0.000]  M[0.000, 0.000, 0.000]")
         self.offset_label.setStyleSheet("color: gray;")
 
         tare_row.addWidget(tare_btn)
@@ -260,13 +290,14 @@ class CellTab(QWidget):
             self._update_offset_label()
 
     def clear_tare(self):
-        self.offset = [0.0, 0.0, 0.0]
+        self.offset = [0.0] * N_AXES
         self._update_offset_label()
 
     def _update_offset_label(self):
         o = self.offset
         self.offset_label.setText(
-            f"offset: [{o[0]:+.3f}, {o[1]:+.3f}, {o[2]:+.3f}]")
+            f"offset: F[{o[0]:+.3f}, {o[1]:+.3f}, {o[2]:+.3f}]  "
+            f"M[{o[3]:+.3f}, {o[4]:+.3f}, {o[5]:+.3f}]")
 
     @staticmethod
     def _moving_avg(arr, n):
@@ -274,9 +305,7 @@ class CellTab(QWidget):
         if n <= 1 or len(arr) == 0:
             return arr
         kernel = np.ones(n) / n
-        # 'full' convolution, then take the last len(arr) points
         smoothed = np.convolve(arr, kernel, mode="full")[:len(arr)]
-        # First (n-1) samples see a shorter window; recalculate with cumsum
         cs = np.cumsum(arr)
         for j in range(min(n - 1, len(arr))):
             smoothed[j] = cs[j] / (j + 1)
@@ -284,13 +313,22 @@ class CellTab(QWidget):
 
     def refresh(self):
         t, arrs = self.store.get_cell(self.cell_idx, self.window_s)
+        # Force axes (0, 1, 2)
         for i in range(3):
             adjusted = arrs[i] - self.offset[i] if len(arrs[i]) > 0 else arrs[i]
             smoothed = self._moving_avg(adjusted, self.ma_n)
-            self.curves[i].setData(t, smoothed)
+            self.force_curves[i].setData(t, smoothed)
             if len(smoothed) > 0:
-                self.val_labels[i].setText(
-                    f"{AXES[i]}: {smoothed[-1]:+7.3f} N")
+                self.force_labels[i].setText(
+                    f"{FORCE_AXES[i]}: {smoothed[-1]:+7.3f} N")
+        # Moment axes (3, 4, 5)
+        for i in range(3):
+            adjusted = arrs[i+3] - self.offset[i+3] if len(arrs[i+3]) > 0 else arrs[i+3]
+            smoothed = self._moving_avg(adjusted, self.ma_n)
+            self.moment_curves[i].setData(t, smoothed)
+            if len(smoothed) > 0:
+                self.moment_labels[i].setText(
+                    f"{MOMENT_AXES[i]}: {smoothed[-1]:+7.3f} N·mm")
 
 
 # ---------- Main window ----------
@@ -300,7 +338,7 @@ class Dashboard(QMainWindow):
         self.sampler = sampler
         self.store = store
         self.setWindowTitle("Load Cell Dashboard")
-        self.resize(900, 550)
+        self.resize(900, 750)
 
         central = QWidget()
         root = QVBoxLayout()
