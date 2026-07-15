@@ -196,6 +196,7 @@ class CellTab(QWidget):
         self.store = store
         self.offset = [0.0, 0.0, 0.0]
         self.window_s = DEFAULT_WINDOW_S
+        self.ma_n = 1  # 1 = no smoothing
 
         layout = QVBoxLayout()
         layout.setContentsMargins(10, 10, 10, 10)
@@ -267,14 +268,29 @@ class CellTab(QWidget):
         self.offset_label.setText(
             f"offset: [{o[0]:+.3f}, {o[1]:+.3f}, {o[2]:+.3f}]")
 
+    @staticmethod
+    def _moving_avg(arr, n):
+        """Causal moving average — output same length as input, no lookahead."""
+        if n <= 1 or len(arr) == 0:
+            return arr
+        kernel = np.ones(n) / n
+        # 'full' convolution, then take the last len(arr) points
+        smoothed = np.convolve(arr, kernel, mode="full")[:len(arr)]
+        # First (n-1) samples see a shorter window; recalculate with cumsum
+        cs = np.cumsum(arr)
+        for j in range(min(n - 1, len(arr))):
+            smoothed[j] = cs[j] / (j + 1)
+        return smoothed
+
     def refresh(self):
         t, arrs = self.store.get_cell(self.cell_idx, self.window_s)
         for i in range(3):
             adjusted = arrs[i] - self.offset[i] if len(arrs[i]) > 0 else arrs[i]
-            self.curves[i].setData(t, adjusted)
-            if len(adjusted) > 0:
+            smoothed = self._moving_avg(adjusted, self.ma_n)
+            self.curves[i].setData(t, smoothed)
+            if len(smoothed) > 0:
                 self.val_labels[i].setText(
-                    f"{AXES[i]}: {adjusted[-1]:+7.3f} N")
+                    f"{AXES[i]}: {smoothed[-1]:+7.3f} N")
 
 
 # ---------- Main window ----------
@@ -327,6 +343,18 @@ class Dashboard(QMainWindow):
         self.win_combo.currentIndexChanged.connect(self._window_changed)
         ctrl.addWidget(self.win_combo)
 
+        # Moving average
+        ma_label = QLabel("  MA (samples):")
+        ma_label.setFont(ctrl_font)
+        ctrl.addWidget(ma_label)
+        self.ma_spin = QSpinBox()
+        self.ma_spin.setRange(1, 200)
+        self.ma_spin.setValue(1)
+        self.ma_spin.setFont(ctrl_font)
+        self.ma_spin.setToolTip("Moving average window in samples (1 = off)")
+        self.ma_spin.valueChanged.connect(self._ma_changed)
+        ctrl.addWidget(self.ma_spin)
+
         # Clear data
         clear_btn = QPushButton("Clear Data")
         clear_btn.setFont(ctrl_font)
@@ -369,6 +397,10 @@ class Dashboard(QMainWindow):
         ws = self.win_combo.currentData()
         for t in self.cell_tabs:
             t.window_s = ws
+
+    def _ma_changed(self, val):
+        for t in self.cell_tabs:
+            t.ma_n = val
 
     def _clear_data(self):
         self.store.clear()
