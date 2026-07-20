@@ -4,14 +4,10 @@ sensors:
     dev: 0
     csb_gpio: 13
   - name: "Cell 2"
-    bus: 6
-    dev: 0
-    csb_gpio: 12
-  - name: "Cell 3"
     bus: 0
     dev: 0
     csb_gpio: 26
-  - name: "Cell 4"
+  - name: "Cell 3"
     bus: 6
     dev: 0
     csb_gpio: 16
