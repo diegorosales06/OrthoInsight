@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Dual MMS101 force streamer.
+MMS101 multi-sensor force streamer (YAML-configured).
 
-Cell 1: SPI0 (/dev/spidev0.0), CSB = GPIO13
-Cell 2: SPI6 (/dev/spidev6.0), CSB = GPIO12
+Reads sensor definitions from config/sensors.yaml so the number
+of cells, SPI buses, and CSB GPIOs are never hardcoded.
 
 Prereqs on the Pi:
-    sudo apt install python3-spidev python3-gpiozero python3-lgpio
+    sudo apt install python3-spidev python3-gpiozero python3-lgpio python3-yaml
     Enable SPI0: sudo raspi-config -> Interface Options -> SPI -> Yes
     Enable SPI6: add 'dtoverlay=spi6-1cs' to /boot/firmware/config.txt, reboot
 
@@ -15,10 +15,12 @@ Press Ctrl-C to stop.
 
 import time
 import signal
+import pathlib
+import yaml
 import spidev
 from gpiozero import DigitalOutputDevice
 
-# MMS101 commands (SDK manual section 10-4)
+# ── MMS101 commands (SDK manual section 10-4) ────────────────────────
 CMD_START, CMD_DATA2, CMD_BOOT   = 0xF0, 0xE2, 0xB0
 CMD_STOP,  CMD_RESET, CMD_STATUS = 0xB2, 0xB4, 0x80
 CMD_INTERVAL                      = 0x44
@@ -96,40 +98,63 @@ class Sensor:
         self.csb.close()
 
 
-def main():
-    cell1 = Sensor("Cell 1", bus=0, dev=0, csb_gpio=13)
-    cell2 = Sensor("Cell 2", bus=6, dev=0, csb_gpio=12)
-    cell3 = Sensor("Cell 3", bus=0, dev=0, csb_gpio=26)
-    cell4 = Sensor("Cell 4", bus=6, dev=0, csb_gpio=16)
+# ── Config loading ───────────────────────────────────────────────────
+def load_sensors(yaml_path):
+    """Build a list of Sensor objects from a YAML config file."""
+    cfg = yaml.safe_load(pathlib.Path(yaml_path).read_text())
+    sensors = []
+    for entry in cfg["sensors"]:
+        sensors.append(Sensor(
+            name     = entry["name"],
+            bus      = entry["bus"],
+            dev      = entry["dev"],
+            csb_gpio = entry["csb_gpio"],
+        ))
+    return sensors
 
-    print("Initializing Cell 1..."); cell1.init()
-    print("Initializing Cell 2..."); cell2.init()
-    print("Initializing Cell 3..."); cell3.init()
-    print("Initializing Cell 4..."); cell4.init()
-    print("\nStreaming (Ctrl-C to stop)\n")
+
+# ── Main ─────────────────────────────────────────────────────────────
+def main():
+    config_path = pathlib.Path(__file__).parent / "config" / "sensors.yaml"
+    sensors = load_sensors(config_path)
+
+    for s in sensors:
+        print(f"Initializing {s.name}...")
+        s.init()
+    print(f"\nStreaming {len(sensors)} sensor(s)  (Ctrl-C to stop)\n")
 
     running = [True]
     signal.signal(signal.SIGINT, lambda *_: running.__setitem__(0, False))
 
+    cycle_times = []
+
     try:
         while running[0]:
-            f1 = cell1.read_forces()
-            f2 = cell2.read_forces()
-            f3 = cell3.read_forces()
-            f4 = cell4.read_forces()
-            print(f"Cell 1: Fx={f1[0]:+7.3f} Fy={f1[1]:+7.3f} Fz={f1[2]:+7.3f} N"
-                  f"   |   "
-                  f"Cell 2: Fx={f2[0]:+7.3f} Fy={f2[1]:+7.3f} Fz={f2[2]:+7.3f} N"
-                  f"   |   "
-                  f"Cell 3: Fx={f3[0]:+7.3f} Fy={f3[1]:+7.3f} Fz={f3[2]:+7.3f} N"
-                  f"   |   "
-                  f"Cell 4: Fx={f4[0]:+7.3f} Fy={f4[1]:+7.3f} Fz={f4[2]:+7.3f} N")
+            t_start = time.perf_counter()
+
+            forces = [s.read_forces() for s in sensors]
+
+            t_cycle = (time.perf_counter() - t_start) * 1000  # ms
+            cycle_times.append(t_cycle)
+
+            parts = [
+                f"{s.name}: Fx={f[0]:+7.3f} Fy={f[1]:+7.3f} Fz={f[2]:+7.3f} N"
+                for s, f in zip(sensors, forces)
+            ]
+            print("   |   ".join(parts) + f"   [{t_cycle:.2f} ms]")
+
             time.sleep(0.1)
     finally:
         print("\nStopping...")
-        cell1.stop()
-        cell2.stop()
-        cell3.stop()
-        cell4.stop()
+        for s in sensors:
+            s.stop()
+        if cycle_times:
+            avg = sum(cycle_times) / len(cycle_times)
+            print(f"\n── Timing Summary ──")
+            print(f"Cycles:  {len(cycle_times)}")
+            print(f"Average: {avg:.2f} ms")
+            print(f"Min:     {min(cycle_times):.2f} ms")
+            print(f"Max:     {max(cycle_times):.2f} ms")
+
 
 main()
