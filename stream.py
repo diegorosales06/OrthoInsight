@@ -36,14 +36,13 @@ def s24(b):
 
 
 class Sensor:
-    def __init__(self, name, bus, dev, csb_gpio):
+    def __init__(self, name, bus, dev, csb_pin):
         self.name = name
         self.spi = spidev.SpiDev()
         self.spi.open(bus, dev)
         self.spi.mode = 0b11              # SPI mode 3
         self.spi.max_speed_hz = 2_000_000
-        self.csb = DigitalOutputDevice(csb_gpio, active_high=False,
-                                       initial_value=False)  # idle HIGH
+        self.csb = csb_pin                # already output-HIGH
         self.coeff = [[0]*6 for _ in range(6)]
         self.spi.xfer2([0x00])            # dummy clock (SDK note)
 
@@ -100,15 +99,30 @@ class Sensor:
 
 # ── Config loading ───────────────────────────────────────────────────
 def load_sensors(yaml_path):
-    """Build a list of Sensor objects from a YAML config file."""
+    """Build a list of Sensor objects from a YAML config file.
+
+    All CSB pins are claimed as output-HIGH *before* any SPI bus is
+    opened, so no converter board can drive MISO during construction.
+    """
     cfg = yaml.safe_load(pathlib.Path(yaml_path).read_text())
+    entries = cfg["sensors"]
+
+    # Phase 1 — park every CSB HIGH so nothing floats during SPI setup
+    csb_pins = {}
+    for entry in entries:
+        gpio = entry["csb_gpio"]
+        if gpio not in csb_pins:
+            csb_pins[gpio] = DigitalOutputDevice(
+                gpio, active_high=False, initial_value=False)  # HIGH
+
+    # Phase 2 — build Sensor objects, passing the pre-claimed pin
     sensors = []
-    for entry in cfg["sensors"]:
+    for entry in entries:
         sensors.append(Sensor(
             name     = entry["name"],
             bus      = entry["bus"],
             dev      = entry["dev"],
-            csb_gpio = entry["csb_gpio"],
+            csb_pin  = csb_pins[entry["csb_gpio"]],
         ))
     return sensors
 
