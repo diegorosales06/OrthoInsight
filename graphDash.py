@@ -1,21 +1,3 @@
-#!/usr/bin/env python3
-"""
-Load-cell dashboard with real-time plots — runs entirely on the Pi.
-
-Each tab shows one cell with Fx/Fy/Fz plotted vs time (rolling window).
-Controls: Start/Stop, sampling rate, rolling window, tare, clear data.
-
-Install once on the Pi:
-    sudo apt install python3-pyqt6 python3-pyqtgraph python3-numpy
-
-Run (from laptop with X11 forwarding):
-    ssh -X pi@<PI_IP>
-    python3 cell_dashboard.py
-
-Or directly on the Pi with HDMI:
-    python3 cell_dashboard.py
-"""
-
 import sys
 import time
 import threading
@@ -23,6 +5,7 @@ import collections
 import spidev
 from gpiozero import DigitalOutputDevice
 import numpy as np
+import yaml  # Importing the yaml library
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout,
@@ -450,12 +433,14 @@ class Dashboard(QMainWindow):
 
 # ---------- Main ----------
 def main():
-    cells = [
-        Sensor("Cell 1", bus=0, dev=0, csb_gpio=13),
-        Sensor("Cell 2", bus=6, dev=0, csb_gpio=12),
-        Sensor("Cell 3", bus=0, dev=0, csb_gpio=26),
-        Sensor("Cell 4", bus=6, dev=0, csb_gpio=16),
-    ]
+    # Load sensor configuration from YAML file
+    with open("config/sensors.yaml", 'r') as file:
+        config = yaml.safe_load(file)
+
+    cells = []
+    for sensor in config['sensors']:
+        cells.append(Sensor(sensor['name'], sensor['bus'], sensor['dev'], sensor['csb_gpio']))
+
     for c in cells:
         print(f"Initializing {c.name}...")
         c.init()
