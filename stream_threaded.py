@@ -135,7 +135,7 @@ def read_bus(sensor_list):
 
 
 def main():
-    config_path = pathlib.Path(__file__).parent / 'sensors.yaml'
+    config_path = pathlib.Path(__file__).parent / "config" / "sensors.yaml"
     sensors = load_sensors(config_path)
 
     for s in sensors:
