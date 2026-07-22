@@ -189,14 +189,13 @@ def main():
         print('\nStopping...')
         for s in sensors:
             s.stop()
-
         if cycle_times:
-            print('\n── Timing Summary ──')
-            print(f'Cycles:  {len(cycle_times)}')
-            print(f'Average: {sum(cycle_times)/len(cycle_times):.3f} ms')
-            print(f'Min:     {min(cycle_times):.3f} ms')
-            print(f'Max:     {max(cycle_times):.3f} ms')
-
+            avg = sum(cycle_times[20:]) / len(cycle_times[20:])
+            print(f"\n── Timing Summary ──")
+            print(f"Cycles:  {len(cycle_times)}")
+            print(f"Average: {avg:.3f} ms")
+            print(f"Min:     {min(cycle_times[20:]):.3f}ms")
+            print(f"Max:     {max(cycle_times[20:]):.3f} ms")
 
 if __name__ == '__main__':
     main()

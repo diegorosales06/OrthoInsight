@@ -10,4 +10,4 @@ sensors:
   - name: "Cell 3"
     bus: 6
     dev: 0
-    csb_gpio: 16
+    csb_gpio: 12
