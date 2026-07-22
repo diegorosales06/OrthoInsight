@@ -45,7 +45,7 @@ typedef struct {
     unsigned int csb_gpio;
 
     int spi_fd;
-    struct gpiod_line *csb_line;
+    struct gpiod_line_request *csb_request;
     int32_t coeff[6][6];
 } Sensor;
 
@@ -206,7 +206,7 @@ static int load_sensor_config(const char *path, SensorList *sensors)
         .dev = 0,
         .csb_gpio = 0,
         .spi_fd = -1,
-        .csb_line = NULL
+        .csb_request = NULL
     };
 
     int have_name = 0;
@@ -299,7 +299,7 @@ static int load_sensor_config(const char *path, SensorList *sensors)
             in_sensor_mapping = 1;
             memset(&current, 0, sizeof(current));
             current.spi_fd = -1;
-            current.csb_line = NULL;
+            current.csb_request = NULL;
             have_name = have_bus = have_dev = have_csb_gpio = 0;
         } else if (type == YAML_MAPPING_END_EVENT &&
                    in_sensor_mapping) {
@@ -347,7 +347,10 @@ static int spi_write_then_read(Sensor *sensor,
                                uint8_t *rx,
                                size_t rx_length)
 {
-    if (gpiod_line_set_value(sensor->csb_line, 0) < 0) {
+    if (gpiod_line_request_set_value(
+            sensor->csb_request,
+            sensor->csb_gpio,
+            GPIOD_LINE_VALUE_INACTIVE) < 0) {
         fprintf(stderr, "%s: failed to drive CSB low: %s\n",
                 sensor->name, strerror(errno));
         return -1;
@@ -402,7 +405,10 @@ static int spi_write_then_read(Sensor *sensor,
     }
 
 finish:
-    if (gpiod_line_set_value(sensor->csb_line, 1) < 0) {
+    if (gpiod_line_request_set_value(
+            sensor->csb_request,
+            sensor->csb_gpio,
+            GPIOD_LINE_VALUE_ACTIVE) < 0) {
         fprintf(stderr, "%s: failed to drive CSB high: %s\n",
                 sensor->name, strerror(errno));
         result = -1;
@@ -593,7 +599,7 @@ static int read_forces(Sensor *sensor, double forces[3])
 
 static void stop_sensor(Sensor *sensor)
 {
-    if (sensor->spi_fd >= 0 && sensor->csb_line != NULL) {
+    if (sensor->spi_fd >= 0 && sensor->csb_request != NULL) {
         const uint8_t stop = CMD_STOP;
         uint8_t response[1];
         (void)sensor_command(sensor, &stop, 1, response, 1);
@@ -604,9 +610,9 @@ static void stop_sensor(Sensor *sensor)
         sensor->spi_fd = -1;
     }
 
-    if (sensor->csb_line != NULL) {
-        gpiod_line_release(sensor->csb_line);
-        sensor->csb_line = NULL;
+    if (sensor->csb_request != NULL) {
+        gpiod_line_release(sensor->csb_request);
+        sensor->csb_request = NULL;
     }
 }
 
@@ -710,17 +716,53 @@ int main(int argc, char **argv)
     for (size_t i = 0; i < sensors.count; ++i) {
         Sensor *sensor = &sensors.items[i];
 
-        sensor->csb_line =
-            gpiod_chip_get_line(gpio_chip, sensor->csb_gpio);
-        if (sensor->csb_line == NULL) {
-            fprintf(stderr, "%s: unable to get GPIO %u: %s\n",
-                    sensor->name, sensor->csb_gpio, strerror(errno));
+        struct gpiod_line_settings *settings =
+            gpiod_line_settings_new();
+        struct gpiod_line_config *line_config =
+            gpiod_line_config_new();
+        struct gpiod_request_config *request_config =
+            gpiod_request_config_new();
+
+        if (settings == NULL || line_config == NULL ||
+            request_config == NULL) {
+            fprintf(stderr, "%s: failed to allocate libgpiod config\n",
+                    sensor->name);
+            gpiod_line_settings_free(settings);
+            gpiod_line_config_free(line_config);
+            gpiod_request_config_free(request_config);
             goto cleanup;
         }
 
-        if (gpiod_line_request_output(sensor->csb_line,
-                                      "mms101-stream",
-                                      1) < 0) {
+        gpiod_line_settings_set_direction(
+            settings, GPIOD_LINE_DIRECTION_OUTPUT);
+        gpiod_line_settings_set_output_value(
+            settings, GPIOD_LINE_VALUE_ACTIVE);
+
+        unsigned int offset = sensor->csb_gpio;
+        if (gpiod_line_config_add_line_settings(
+                line_config, &offset, 1, settings) < 0) {
+            fprintf(stderr,
+                    "%s: unable to configure GPIO %u: %s\n",
+                    sensor->name, sensor->csb_gpio, strerror(errno));
+            gpiod_line_settings_free(settings);
+            gpiod_line_config_free(line_config);
+            gpiod_request_config_free(request_config);
+            goto cleanup;
+        }
+
+        gpiod_request_config_set_consumer(
+            request_config, "mms101-stream");
+
+        sensor->csb_request =
+            gpiod_chip_request_lines(gpio_chip,
+                                     request_config,
+                                     line_config);
+
+        gpiod_line_settings_free(settings);
+        gpiod_line_config_free(line_config);
+        gpiod_request_config_free(request_config);
+
+        if (sensor->csb_request == NULL) {
             fprintf(stderr,
                     "%s: unable to claim GPIO %u as output-high: %s\n",
                     sensor->name, sensor->csb_gpio, strerror(errno));
