@@ -157,7 +157,7 @@ def main():
     try:
         while running[0]:
             cycle_start = time.perf_counter()
-
+            # submits a task for each bus group
             futures = [
                 executor.submit(read_bus, sensor_group)
                 for sensor_group in bus_groups.values()

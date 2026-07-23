@@ -1,9 +1,15 @@
+import argparse
+import os
 import sys
 import time
 import threading
 import collections
-import spidev
-from gpiozero import DigitalOutputDevice
+try:
+    import spidev
+    from gpiozero import DigitalOutputDevice
+except ImportError:
+    spidev = None
+    DigitalOutputDevice = None
 import numpy as np
 import yaml  # Importing the yaml library
 
@@ -42,6 +48,10 @@ def s24(b):
 
 class Sensor:
     def __init__(self, name, bus, dev, csb_gpio):
+        if spidev is None or DigitalOutputDevice is None:
+            raise RuntimeError(
+                "Real sensors require spidev and gpiozero. "
+                "Run with --debug to use the UI without hardware.")
         self.name = name
         self.spi = spidev.SpiDev()
         self.spi.open(bus, dev)
@@ -51,6 +61,27 @@ class Sensor:
                                        initial_value=False)
         self.coeff = [[0]*6 for _ in range(6)]
         self.spi.xfer2([0x00])
+
+
+class DummySensor:
+    def __init__(self, name, amplitude=1.0, frequency=0.25, phase=0.0):
+        self.name = name
+        self.start_time = time.time()
+        self.amplitude = amplitude
+        self.frequency = frequency
+        self.phase = phase
+
+    def read_all(self):
+        t = time.time() - self.start_time
+        values = []
+        for axis in range(N_AXES):
+            base = np.sin(2 * np.pi * self.frequency * t + self.phase + axis * 0.5)
+            noise = 0.02 * np.sin(2 * np.pi * (self.frequency * 3) * t + axis)
+            values.append(float(self.amplitude * (base + noise)))
+        return values
+
+    def stop(self):
+        pass
 
     def _xfer(self, tx, rx_len):
         self.csb.on()
@@ -149,9 +180,11 @@ class DataStore:
 class Sampler(threading.Thread):
     daemon = True
 
-    def __init__(self, cells, store):
+    def __init__(self, cells, store, simulation_cells=None, simulate=False):
         super().__init__()
         self.cells = cells
+        self.simulation_cells = simulation_cells or []
+        self.simulate = simulate
         self.store = store
         self.rate_hz = DEFAULT_RATE_HZ
         self.running = False
@@ -164,7 +197,13 @@ class Sampler(threading.Thread):
                 continue
             t0 = time.time()
             readings = []
-            for c in self.cells:
+            source_cells = self.simulation_cells if self.simulate else self.cells
+            if not source_cells and self.simulation_cells:
+                source_cells = [None] * len(self.simulation_cells)
+            for c in source_cells:
+                if c is None:
+                    readings.append([0.0] * N_AXES)
+                    continue
                 try:
                     readings.append(c.read_all())
                 except Exception:
@@ -376,6 +415,16 @@ class Dashboard(QMainWindow):
         self.ma_spin.valueChanged.connect(self._ma_changed)
         ctrl.addWidget(self.ma_spin)
 
+        # Debug / simulation mode
+        self.debug_btn = QPushButton("Debug Mode")
+        self.debug_btn.setFont(ctrl_font)
+        self.debug_btn.setMinimumHeight(40)
+        self.debug_btn.setCheckable(True)
+        self.debug_btn.setChecked(self.sampler.simulate)
+        self.debug_btn.clicked.connect(self._toggle_debug)
+        ctrl.addWidget(self.debug_btn)
+        self._toggle_debug()
+
         # Clear data
         clear_btn = QPushButton("Clear Data")
         clear_btn.setFont(ctrl_font)
@@ -411,6 +460,15 @@ class Dashboard(QMainWindow):
             self.start_btn.setText("Start")
             self.start_btn.setStyleSheet("")
 
+    def _toggle_debug(self):
+        self.sampler.simulate = self.debug_btn.isChecked()
+        if self.sampler.simulate:
+            self.debug_btn.setText("Debug Mode: ON")
+            self.debug_btn.setStyleSheet("background-color: #3498db; color: white;")
+        else:
+            self.debug_btn.setText("Debug Mode: OFF")
+            self.debug_btn.setStyleSheet("")
+
     def _rate_changed(self, val):
         self.sampler.rate_hz = val
 
@@ -432,26 +490,79 @@ class Dashboard(QMainWindow):
 
 
 # ---------- Main ----------
-def main():
-    # Load sensor configuration from YAML file
-    with open("config/sensors.yaml", 'r') as file:
-        config = yaml.safe_load(file)
 
+def load_sensor_config(path):
+    if not os.path.exists(path):
+        return None
+    with open(path, 'r') as file:
+        return yaml.safe_load(file)
+
+
+def build_simulation_cells(names):
     cells = []
-    for sensor in config['sensors']:
-        cells.append(Sensor(sensor['name'], sensor['bus'], sensor['dev'], sensor['csb_gpio']))
+    for i, name in enumerate(names):
+        cells.append(DummySensor(
+            name,
+            amplitude=1.0 + 0.1 * i,
+            frequency=0.2 + 0.05 * i,
+            phase=i * 0.7,
+        ))
+    return cells
 
-    for c in cells:
-        print(f"Initializing {c.name}...")
-        c.init()
-    print("All cells ready.\n")
 
-    store = DataStore(len(cells))
-    sampler = Sampler(cells, store)
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Load Cell Dashboard")
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="Run the UI with simulated data instead of real sensors")
+    parser.add_argument(
+        "--cells", type=int, default=None,
+        help="Number of simulated cells when running in debug mode")
+    parser.add_argument(
+        "--config", default="config/sensors.yaml",
+        help="Sensor configuration YAML file")
+    args = parser.parse_args(argv)
+
+    config = load_sensor_config(args.config)
+    names = []
+    if config and isinstance(config.get('sensors'), list):
+        names = [sensor.get('name', f"Cell {i+1}")
+                 for i, sensor in enumerate(config['sensors'])]
+
+    if args.debug:
+        if args.cells is not None:
+            n_cells = max(1, args.cells)
+            if len(names) < n_cells:
+                names += [f"Cell {len(names) + j + 1}"
+                          for j in range(n_cells - len(names))]
+            else:
+                names = names[:n_cells]
+        elif not names:
+            names = ["Cell 1"]
+        cells = []
+        simulation_cells = build_simulation_cells(names)
+        print(f"Starting in debug mode with {len(simulation_cells)} simulated cells.")
+    else:
+        if not config or 'sensors' not in config:
+            raise FileNotFoundError(
+                f"Sensor configuration not found at {args.config}. "
+                "Use --debug to run without hardware.")
+        cells = []
+        for sensor in config['sensors']:
+            cells.append(Sensor(sensor['name'], sensor['bus'], sensor['dev'], sensor['csb_gpio']))
+        for c in cells:
+            print(f"Initializing {c.name}...")
+            c.init()
+        print("All cells ready.\n")
+        simulation_cells = build_simulation_cells(names)
+
+    n_cells = len(names) if names else len(cells)
+    store = DataStore(n_cells)
+    sampler = Sampler(cells, store, simulation_cells=simulation_cells, simulate=args.debug)
     sampler.start()
 
-    app = QApplication(sys.argv)
-    win = Dashboard(sampler, store, len(cells))
+    app = QApplication([sys.argv[0]])
+    win = Dashboard(sampler, store, n_cells)
     win.show()
 
     exit_code = app.exec()
@@ -462,4 +573,5 @@ def main():
     sys.exit(exit_code)
 
 
-main()
+if __name__ == "__main__":
+    main()
