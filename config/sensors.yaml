@@ -3,11 +3,14 @@ sensors:
     bus: 0
     dev: 0
     csb_gpio: 5
+    tooth: 19
   - name: "Cell 2"
     bus: 0
     dev: 0
     csb_gpio: 26
+    tooth: 30
   - name: "Cell 3"
     bus: 6
     dev: 0
     csb_gpio: 16
+    tooth: 21

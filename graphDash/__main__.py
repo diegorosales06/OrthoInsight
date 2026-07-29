@@ -27,9 +27,11 @@ def main(argv=None):
 
     config = load_sensor_config(args.config)
     names = []
+    teeth = []
     if config and isinstance(config.get('sensors'), list):
         names = [sensor.get('name', f"Cell {i+1}")
                  for i, sensor in enumerate(config['sensors'])]
+        teeth = [sensor.get('tooth') for sensor in config['sensors']]
 
     if args.debug:
         if args.cells is not None:
@@ -37,10 +39,13 @@ def main(argv=None):
             if len(names) < n_cells:
                 names += [f"Cell {len(names) + j + 1}"
                           for j in range(n_cells - len(names))]
+                teeth += [None] * (n_cells - len(teeth))
             else:
                 names = names[:n_cells]
+                teeth = teeth[:n_cells]
         elif not names:
             names = ["Cell 1"]
+            teeth = [None]
         cells = []
         simulation_cells = build_simulation_cells(names)
         print(f"Starting in debug mode with {len(simulation_cells)} simulated cells.")
@@ -71,8 +76,15 @@ def main(argv=None):
                       csv_logger=csv_logger, cell_names=names)
     sampler.start()
 
+    # Ensure teeth list matches n_cells (defensive; real-hardware path already parallel)
+    if len(teeth) < n_cells:
+        teeth += [None] * (n_cells - len(teeth))
+    else:
+        teeth = teeth[:n_cells]
+
     app = QApplication([sys.argv[0]])
-    win = Dashboard(sampler, store, n_cells, csv_logger=csv_logger)
+    win = Dashboard(sampler, store, n_cells, csv_logger=csv_logger,
+                    tooth_per_cell=teeth)
     win.show()
 
     exit_code = app.exec()
