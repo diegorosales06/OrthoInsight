@@ -1,0 +1,9 @@
+numpy
+PyQt6
+pyqtgraph
+PyYAML
+
+# Hardware-only (Raspberry Pi) — not needed for --debug mode:
+# spidev
+# gpiozero
+# lgpio
