@@ -1,9 +1,12 @@
 import argparse
+import csv
 import os
 import sys
 import time
 import threading
 import collections
+from datetime import datetime
+from queue import Queue
 try:
     import spidev
     from gpiozero import DigitalOutputDevice
@@ -62,27 +65,6 @@ class Sensor:
         self.coeff = [[0]*6 for _ in range(6)]
         self.spi.xfer2([0x00])
 
-
-class DummySensor:
-    def __init__(self, name, amplitude=1.0, frequency=0.25, phase=0.0):
-        self.name = name
-        self.start_time = time.time()
-        self.amplitude = amplitude
-        self.frequency = frequency
-        self.phase = phase
-
-    def read_all(self):
-        t = time.time() - self.start_time
-        values = []
-        for axis in range(N_AXES):
-            base = np.sin(2 * np.pi * self.frequency * t + self.phase + axis * 0.5)
-            noise = 0.02 * np.sin(2 * np.pi * (self.frequency * 3) * t + axis)
-            values.append(float(self.amplitude * (base + noise)))
-        return values
-
-    def stop(self):
-        pass
-
     def _xfer(self, tx, rx_len):
         self.csb.on()
         try:
@@ -133,6 +115,28 @@ class DummySensor:
         self.csb.close()
 
 
+class DummySensor:
+    def __init__(self, name, amplitude=1.0, frequency=0.25, phase=0.0):
+        self.name = name
+        self.start_time = time.time()
+        self.amplitude = amplitude
+        self.frequency = frequency
+        self.phase = phase
+
+    def read_all(self):
+        t = time.time() - self.start_time
+        values = []
+        for axis in range(N_AXES):
+            base = np.sin(2 * np.pi * self.frequency * t + self.phase + axis * 0.5)
+            noise = 0.02 * np.sin(2 * np.pi * (self.frequency * 3) * t + axis)
+            values.append(float(self.amplitude * (base + noise)))
+        return values
+
+    def stop(self):
+        pass
+        self.csb.close()
+
+
 # ---------- Shared data store ----------
 class DataStore:
     """Thread-safe ring buffer for timestamped force data."""
@@ -176,16 +180,99 @@ class DataStore:
         return t, arrs
 
 
+# ---------- CSV Logger thread ----------
+class CSVLogger(threading.Thread):
+    daemon = True
+
+    def __init__(self, log_dir="/home/sparkrnd/OrthoInsightLogs"):
+        super().__init__()
+        self.log_dir = log_dir
+        self.queue = Queue()
+        self.running = False
+        self._stop = False
+        self.file_handle = None
+        self.csv_writer = None
+        self.start_time = None
+        self.buffer = []
+        self.buffer_size = 500
+
+    def run(self):
+        try:
+           self._setup_logging()
+           while not self._stop:
+               try:
+                   item = self.queue.get(timeout=0.1)
+                   if item is None:
+                       break
+                   self.buffer.append(item)
+                   if len(self.buffer) >= self.buffer_size:
+                       self._flush()
+               except:
+                   if len(self.buffer) > 0:
+                       self._flush()
+           self._flush()
+        finally:
+           self._close_file()
+
+    def _setup_logging(self):
+        try:
+           date_str = datetime.now().strftime("%Y-%m-%d")
+           day_dir = os.path.join(self.log_dir, date_str)
+           os.makedirs(day_dir, exist_ok=True)
+
+           timestamp_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+           log_file = os.path.join(day_dir, f"log_{timestamp_str}.csv")
+
+           self.file_handle = open(log_file, 'w', newline='', buffering=1)
+           self.csv_writer = csv.writer(self.file_handle)
+           self.csv_writer.writerow(['timestamp', 'cell_id', 'Fx', 'Fy', 'Fz', 'Mx', 'My', 'Mz'])
+           self.start_time = time.time()
+           self.running = True
+        except Exception as e:
+           print(f"Error setting up CSV logging: {e}")
+           self.running = False
+
+    def log_sample(self, timestamp_absolute, cell_id, force_moment_values):
+        if self.running and self.start_time is not None:
+           relative_time = timestamp_absolute - self.start_time
+           self.queue.put((relative_time, cell_id, force_moment_values))
+
+    def _flush(self):
+        if self.csv_writer and len(self.buffer) > 0:
+           try:
+               for relative_time, cell_id, values in self.buffer:
+                   row = [f"{relative_time:.6f}", cell_id] + [f"{v:.6f}" for v in values]
+                   self.csv_writer.writerow(row)
+               self.file_handle.flush()
+           except Exception as e:
+               print(f"Error writing to CSV: {e}")
+           finally:
+               self.buffer = []
+
+    def _close_file(self):
+        if self.file_handle:
+           try:
+               self.file_handle.close()
+           except Exception as e:
+               print(f"Error closing CSV file: {e}")
+        self.running = False
+
+    def stop(self):
+        self._stop = True
+
+
 # ---------- Sampler thread ----------
 class Sampler(threading.Thread):
     daemon = True
 
-    def __init__(self, cells, store, simulation_cells=None, simulate=False):
+    def __init__(self, cells, store, simulation_cells=None, simulate=False, csv_logger=None, cell_names=None):
         super().__init__()
         self.cells = cells
         self.simulation_cells = simulation_cells or []
         self.simulate = simulate
         self.store = store
+        self.csv_logger = csv_logger
+        self.cell_names = cell_names or [f"Cell {i+1}" for i in range(len(cells) or len(simulation_cells))]
         self.rate_hz = DEFAULT_RATE_HZ
         self.running = False
         self._stop = False
@@ -209,6 +296,11 @@ class Sampler(threading.Thread):
                 except Exception:
                     readings.append([0.0] * N_AXES)
             self.store.append(t0, readings)
+            
+            if not self.simulate and self.csv_logger:
+                for cell_idx, reading in enumerate(readings):
+                    self.csv_logger.log_sample(t0, self.cell_names[cell_idx], reading)
+            
             elapsed = time.time() - t0
             period = 1.0 / self.rate_hz
             if elapsed < period:
@@ -558,7 +650,14 @@ def main(argv=None):
 
     n_cells = len(names) if names else len(cells)
     store = DataStore(n_cells)
-    sampler = Sampler(cells, store, simulation_cells=simulation_cells, simulate=args.debug)
+    
+    csv_logger = None
+    if not args.debug:
+        csv_logger = CSVLogger()
+        csv_logger.start()
+    
+    sampler = Sampler(cells, store, simulation_cells=simulation_cells, simulate=args.debug, 
+                      csv_logger=csv_logger, cell_names=names)
     sampler.start()
 
     app = QApplication([sys.argv[0]])
@@ -568,6 +667,8 @@ def main(argv=None):
     exit_code = app.exec()
 
     sampler._stop = True
+    if csv_logger:
+        csv_logger.stop()
     for c in cells:
         c.stop()
     sys.exit(exit_code)
