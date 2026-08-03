@@ -69,11 +69,11 @@ class Sensor:
         time.sleep(0.01)
 
     def read_all(self):
-        """Returns [Fx, Fy, Fz, Mx, My, Mz]."""
+        """Returns [Fx, Fy, Fz] force data only."""
         r = self._cmd([CMD_DATA2], 21)
         adc = [s24(r[3+k*3 : 6+k*3]) for k in range(6)]
         out = []
-        for axis in range(6):
+        for axis in range(3):
             acc = sum(c * a for c, a in zip(self.coeff[axis], adc))
             out.append(int(acc / 2048) / 1000.0)
         return out
@@ -94,9 +94,10 @@ class DummySensor:
         self.phase = phase
 
     def read_all(self):
+        """Returns [Fx, Fy, Fz] simulated force data only."""
         t = time.time() - self.start_time
         values = []
-        for axis in range(N_AXES):
+        for axis in range(3):
             base = np.sin(2 * np.pi * self.frequency * t + self.phase + axis * 0.5)
             noise = 0.02 * np.sin(2 * np.pi * (self.frequency * 3) * t + axis)
             values.append(float(self.amplitude * (base + noise)))
@@ -104,4 +105,3 @@ class DummySensor:
 
     def stop(self):
         pass
-        self.csb.close()

@@ -8,14 +8,16 @@ from graphDash.constants import (
     FORCE_AXES, FORCE_COLORS, MOMENT_AXES, MOMENT_COLORS,
     DEFAULT_WINDOW_S, N_AXES,
 )
+from graphDash.moment_calculator import calculate_moment
 
 
 class CellTab(QWidget):
-    def __init__(self, cell_idx, store):
+    def __init__(self, cell_idx, store, position_vector_config=None):
         super().__init__()
         self.cell_idx = cell_idx
         self.store = store
-        self.offset = [0.0] * N_AXES
+        self.position_vector_config = position_vector_config
+        self.offset = [0.0] * 3  # Force offset only (Fx, Fy, Fz)
         self.window_s = DEFAULT_WINDOW_S
         self.ma_n = 1  # 1 = no smoothing
 
@@ -102,18 +104,17 @@ class CellTab(QWidget):
     def tare(self):
         t, arrs = self.store.get_cell(self.cell_idx)
         if len(t) > 0:
-            self.offset = [float(a[-1]) for a in arrs]
+            self.offset = [float(a[-1]) for a in arrs[:3]]
             self._update_offset_label()
 
     def clear_tare(self):
-        self.offset = [0.0] * N_AXES
+        self.offset = [0.0] * 3
         self._update_offset_label()
 
     def _update_offset_label(self):
         o = self.offset
         self.offset_label.setText(
-            f"offset: F[{o[0]:+.3f}, {o[1]:+.3f}, {o[2]:+.3f}]  "
-            f"M[{o[3]:+.3f}, {o[4]:+.3f}, {o[5]:+.3f}]")
+            f"offset: F[{o[0]:+.3f}, {o[1]:+.3f}, {o[2]:+.3f}]")
 
     @staticmethod
     def _moving_avg(arr, n):
@@ -137,11 +138,28 @@ class CellTab(QWidget):
             if len(smoothed) > 0:
                 self.force_labels[i].setText(
                     f"{FORCE_AXES[i]}: {smoothed[-1]:+7.3f} N")
-        # Moment axes (3, 4, 5)
-        for i in range(3):
-            adjusted = arrs[i+3] - self.offset[i+3] if len(arrs[i+3]) > 0 else arrs[i+3]
-            smoothed = self._moving_avg(adjusted, self.ma_n)
-            self.moment_curves[i].setData(t, smoothed)
-            if len(smoothed) > 0:
-                self.moment_labels[i].setText(
-                    f"{MOMENT_AXES[i]}: {smoothed[-1]:+7.3f} N·mm")
+
+        # Moment axes (calculated from tared force + position vector)
+        if self.position_vector_config and len(arrs[0]) > 0:
+            rx, ry, rz = self.position_vector_config.get_vector()
+            moments = [[], [], []]
+            for j in range(len(arrs[0])):
+                fx = arrs[0][j] - self.offset[0]
+                fy = arrs[1][j] - self.offset[1]
+                fz = arrs[2][j] - self.offset[2]
+                mx, my, mz = calculate_moment(rx, ry, rz, fx, fy, fz)
+                moments[0].append(mx)
+                moments[1].append(my)
+                moments[2].append(mz)
+
+            for i in range(3):
+                moment_arr = np.array(moments[i])
+                smoothed = self._moving_avg(moment_arr, self.ma_n)
+                self.moment_curves[i].setData(t, smoothed)
+                if len(smoothed) > 0:
+                    self.moment_labels[i].setText(
+                        f"{MOMENT_AXES[i]}: {smoothed[-1]:+7.3f} N·mm")
+        else:
+            for i in range(3):
+                self.moment_curves[i].setData([], [])
+                self.moment_labels[i].setText(f"{MOMENT_AXES[i]}: +0.000 N·mm")

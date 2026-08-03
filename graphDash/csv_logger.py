@@ -7,6 +7,7 @@ from queue import Queue
 
 from graphDash import session_manager
 from graphDash.paths import logs_dir, ensure_dirs
+from graphDash.moment_calculator import calculate_moment
 
 
 class CSVLogger(threading.Thread):
@@ -16,11 +17,12 @@ class CSVLogger(threading.Thread):
 
     daemon = True
 
-    def __init__(self):
+    def __init__(self, position_vector_config=None):
         super().__init__()
         self.queue = Queue()
         self._stop = False
         self._lock = threading.Lock()
+        self.position_vector_config = position_vector_config
 
         # Per-recording state (guarded by _lock)
         self.recording = False
@@ -58,6 +60,7 @@ class CSVLogger(threading.Thread):
                 self._reset_recording_state_locked()
                 return ""
 
+
     def stop_recording(self) -> None:
         """Flush, close the current file, end the session, prune old ones."""
         with self._lock:
@@ -78,12 +81,21 @@ class CSVLogger(threading.Thread):
             except Exception as e:
                 print(f"Error finalizing session {session_id}: {e}")
 
-    def log_sample(self, timestamp_absolute, cell_id, force_moment_values):
+    def log_sample(self, timestamp_absolute, cell_id, force_values):
+        """Log a sample with force data. Moments are calculated from force + position vector."""
         with self._lock:
             if not self.recording or self.start_time is None:
                 return
             relative_time = timestamp_absolute - self.start_time
-        self.queue.put((relative_time, cell_id, force_moment_values))
+
+        fx, fy, fz = force_values[:3]
+        moment = (0, 0, 0)
+        if self.position_vector_config:
+            rx, ry, rz = self.position_vector_config.get_vector()
+            moment = calculate_moment(rx, ry, rz, fx, fy, fz)
+
+        all_values = list(force_values[:3]) + list(moment)
+        self.queue.put((relative_time, cell_id, all_values))
 
     def stop(self):
         self._stop = True

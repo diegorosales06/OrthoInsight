@@ -10,6 +10,7 @@ from graphDash.datastore import DataStore
 from graphDash.csv_logger import CSVLogger
 from graphDash.sampler import Sampler
 from graphDash.ui.dashboard import Dashboard
+from graphDash.position_vector_config import PositionVectorConfig
 
 
 def main(argv=None):
@@ -69,7 +70,8 @@ def main(argv=None):
     session_manager.init_db()
     session_manager.prune_old_sessions()
 
-    csv_logger = CSVLogger()
+    position_vector_config = PositionVectorConfig()
+    csv_logger = CSVLogger(position_vector_config=position_vector_config)
     csv_logger.start()
 
     sampler = Sampler(cells, store, simulation_cells=simulation_cells, simulate=args.debug,
@@ -84,7 +86,7 @@ def main(argv=None):
 
     app = QApplication([sys.argv[0]])
     win = Dashboard(sampler, store, n_cells, csv_logger=csv_logger,
-                    tooth_per_cell=teeth)
+                    tooth_per_cell=teeth, position_vector_config=position_vector_config)
     win.show()
 
     exit_code = app.exec()

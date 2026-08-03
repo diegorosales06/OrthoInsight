@@ -10,7 +10,7 @@ FORCE_COLORS = ("#e74c3c", "#2ecc71", "#3498db")  # red, green, blue
 MOMENT_AXES   = ("Mx", "My", "Mz")
 MOMENT_COLORS = ("#e67e22", "#9b59b6", "#1abc9c")  # orange, purple, teal
 ALL_AXES = FORCE_AXES + MOMENT_AXES
-N_AXES = 6
+N_AXES = 3  # Force axes only; moments are calculated
 
 DEFAULT_RATE_HZ    = 20
 DEFAULT_WINDOW_S   = 10
