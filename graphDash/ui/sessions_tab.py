@@ -20,7 +20,9 @@ class SessionsTab(QWidget):
         super().__init__()
         self.page = 0
         self.selected_file = None
+        self.manual_file = None
         self.viewer_visible = False
+        self.viewing_manual = False
         self._last_signature = None
 
         layout = QVBoxLayout()
@@ -67,11 +69,16 @@ class SessionsTab(QWidget):
         self.viewer_title = QLabel("No file selected")
         self.viewer_title.setFont(ctrl_font)
         self.viewer_title.setStyleSheet("color: gray;")
+        self.toggle_log_btn = QPushButton("Show Manual Log")
+        self.toggle_log_btn.setFont(ctrl_font)
+        self.toggle_log_btn.clicked.connect(self._toggle_log_view)
+        self.toggle_log_btn.setVisible(False)
         self.hide_btn = QPushButton("Hide")
         self.hide_btn.setFont(ctrl_font)
         self.hide_btn.clicked.connect(self._hide_viewer)
         self.hide_btn.setVisible(False)
         viewer_hdr.addWidget(self.viewer_title, 1)
+        viewer_hdr.addWidget(self.toggle_log_btn)
         viewer_hdr.addWidget(self.hide_btn)
         layout.addLayout(viewer_hdr)
 
@@ -117,8 +124,9 @@ class SessionsTab(QWidget):
         self.prev_btn.setEnabled(self.page > 0)
         self.next_btn.setEnabled(self.page < n_pages - 1)
 
-        if self.viewer_visible and self.selected_file:
-            if not os.path.exists(self.selected_file):
+        if self.viewer_visible:
+            current_file = self.manual_file if self.viewing_manual else self.selected_file
+            if current_file and not os.path.exists(current_file):
                 self._show_missing_file()
 
     def _populate_table(self, rows):
@@ -136,11 +144,21 @@ class SessionsTab(QWidget):
                 end_item.setForeground(Qt.GlobalColor.red)
             self.table.setItem(i, 2, end_item)
 
-            path_item = QTableWidgetItem(r["file_path"])
+            # Display both auto-log and manual-log in one cell
+            auto_name = os.path.basename(r["file_path"])
+            manual_name = os.path.basename(r["manual_file_path"]) if r["manual_file_path"] else None
+
+            if manual_name:
+                display_text = f"{auto_name}\n{manual_name}"
+            else:
+                display_text = auto_name
+
+            path_item = QTableWidgetItem(display_text)
             path_item.setForeground(Qt.GlobalColor.blue)
             path_item.setToolTip("Click to view CSV")
             path_item.setData(Qt.ItemDataRole.UserRole, r["file_path"])
             path_item.setData(Qt.ItemDataRole.UserRole + 1, r["end_time"])
+            path_item.setData(Qt.ItemDataRole.UserRole + 2, r["manual_file_path"])
             self.table.setItem(i, 3, path_item)
 
     # ---- Interaction ----
@@ -164,14 +182,27 @@ class SessionsTab(QWidget):
             return
         path = item.data(Qt.ItemDataRole.UserRole)
         end_time = item.data(Qt.ItemDataRole.UserRole + 1)
+        manual_path = item.data(Qt.ItemDataRole.UserRole + 2)
+        self.selected_file = path
+        self.manual_file = manual_path
+        self.viewing_manual = False
         self._show_csv(path, in_progress=(end_time is None))
 
     def _show_csv(self, path, in_progress=False):
-        self.selected_file = path
         self.viewer_visible = True
         self.viewer_title.setText(f"Selected: {os.path.basename(path)}")
         self.viewer_title.setStyleSheet("color: black;")
         self.hide_btn.setVisible(True)
+
+        # Show toggle button only if manual log exists
+        if self.manual_file:
+            self.toggle_log_btn.setVisible(True)
+            if self.viewing_manual:
+                self.toggle_log_btn.setText("Show Auto Log")
+            else:
+                self.toggle_log_btn.setText("Show Manual Log")
+        else:
+            self.toggle_log_btn.setVisible(False)
 
         if not os.path.exists(path):
             self._show_missing_file()
@@ -219,11 +250,22 @@ class SessionsTab(QWidget):
             "File not found on disk (stale DB record or manually deleted).")
         self.viewer_status.setVisible(True)
 
+    def _toggle_log_view(self):
+        if self.viewing_manual and self.selected_file:
+            self.viewing_manual = False
+            self._show_csv(self.selected_file)
+        elif not self.viewing_manual and self.manual_file:
+            self.viewing_manual = True
+            self._show_csv(self.manual_file)
+
     def _hide_viewer(self):
         self.viewer_visible = False
         self.selected_file = None
+        self.manual_file = None
+        self.viewing_manual = False
         self.viewer.setVisible(False)
         self.viewer_status.setVisible(False)
         self.hide_btn.setVisible(False)
+        self.toggle_log_btn.setVisible(False)
         self.viewer_title.setText("No file selected")
         self.viewer_title.setStyleSheet("color: gray;")

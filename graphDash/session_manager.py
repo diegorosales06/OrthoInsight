@@ -21,17 +21,23 @@ def init_db() -> None:
                 session_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 start_time TEXT NOT NULL,
                 end_time   TEXT,
-                file_path  TEXT NOT NULL
+                file_path  TEXT NOT NULL,
+                manual_file_path TEXT
             )
         """)
+        # Add manual_file_path column if it doesn't exist (migration for existing DBs)
+        try:
+            conn.execute("ALTER TABLE sessions ADD COLUMN manual_file_path TEXT")
+        except Exception:
+            pass  # Column already exists
 
 
-def start_session(csv_file_path: str) -> int:
+def start_session(csv_file_path: str, manual_file_path: str = None) -> int:
     start = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with _connect() as conn:
         cur = conn.execute(
-            "INSERT INTO sessions (start_time, end_time, file_path) VALUES (?, NULL, ?)",
-            (start, csv_file_path),
+            "INSERT INTO sessions (start_time, end_time, file_path, manual_file_path) VALUES (?, NULL, ?, ?)",
+            (start, csv_file_path, manual_file_path),
         )
         return cur.lastrowid
 
@@ -48,7 +54,7 @@ def end_session(session_id: int) -> None:
 def get_sessions(limit: int = 20, offset: int = 0):
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT session_id, start_time, end_time, file_path "
+            "SELECT session_id, start_time, end_time, file_path, manual_file_path "
             "FROM sessions ORDER BY session_id DESC LIMIT ? OFFSET ?",
             (limit, offset),
         ).fetchall()
@@ -58,7 +64,7 @@ def get_sessions(limit: int = 20, offset: int = 0):
 def get_session_by_id(session_id: int):
     with _connect() as conn:
         row = conn.execute(
-            "SELECT session_id, start_time, end_time, file_path "
+            "SELECT session_id, start_time, end_time, file_path, manual_file_path "
             "FROM sessions WHERE session_id = ?",
             (session_id,),
         ).fetchone()
@@ -75,7 +81,7 @@ def prune_old_sessions(keep_count: int = DEFAULT_KEEP) -> int:
     Returns the number of session rows removed."""
     with _connect() as conn:
         old = conn.execute(
-            "SELECT session_id, file_path FROM sessions "
+            "SELECT session_id, file_path, manual_file_path FROM sessions "
             "ORDER BY session_id DESC LIMIT -1 OFFSET ?",
             (keep_count,),
         ).fetchall()
@@ -86,7 +92,12 @@ def prune_old_sessions(keep_count: int = DEFAULT_KEEP) -> int:
             try:
                 os.remove(r["file_path"])
             except OSError:
-                pass  # already gone or inaccessible — DB row still gets pruned
+                pass
+            if r["manual_file_path"]:
+                try:
+                    os.remove(r["manual_file_path"])
+                except OSError:
+                    pass
         placeholders = ",".join("?" * len(ids))
         conn.execute(f"DELETE FROM sessions WHERE session_id IN ({placeholders})", ids)
         return len(ids)

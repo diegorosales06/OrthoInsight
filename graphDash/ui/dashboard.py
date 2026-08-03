@@ -91,6 +91,14 @@ class Dashboard(QMainWindow):
         clear_btn.clicked.connect(self._clear_data)
         ctrl.addWidget(clear_btn)
 
+        # Log Point (manual logging)
+        self.log_point_btn = QPushButton("Log Point")
+        self.log_point_btn.setFont(ctrl_font)
+        self.log_point_btn.setMinimumHeight(40)
+        self.log_point_btn.setEnabled(False)
+        self.log_point_btn.clicked.connect(self._log_manual_point)
+        ctrl.addWidget(self.log_point_btn)
+
         ctrl.addStretch()
         root.addLayout(ctrl)
 
@@ -120,12 +128,14 @@ class Dashboard(QMainWindow):
             self.start_btn.setText("Stop")
             self.start_btn.setStyleSheet(
                 "background-color: #e74c3c; color: white;")
+            self.log_point_btn.setEnabled(True)
         else:
             self.sampler.running = False
             if self.csv_logger:
                 self.csv_logger.stop_recording()
             self.start_btn.setText("Start")
             self.start_btn.setStyleSheet("")
+            self.log_point_btn.setEnabled(False)
             self.sessions_tab.refresh()
 
     def _toggle_debug(self):
@@ -151,6 +161,20 @@ class Dashboard(QMainWindow):
 
     def _clear_data(self):
         self.store.clear()
+
+    def _log_manual_point(self):
+        """Capture and log current data point for all cells."""
+        if not self.csv_logger:
+            return
+
+        import time
+        timestamp = time.time()
+
+        for cell_idx in range(len(self.cell_tabs)):
+            t, arrs = self.store.get_cell(cell_idx)
+            if len(t) > 0:
+                force_moment = [arr[-1] for arr in arrs]
+                self.csv_logger.log_manual_point(timestamp, f"Cell {cell_idx + 1}", force_moment)
 
     def _refresh(self):
         for t in self.cell_tabs:

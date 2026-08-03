@@ -30,6 +30,12 @@ class CSVLogger(threading.Thread):
         self.current_file = None
         self.start_time = None
 
+        # Manual logging state (guarded by _lock)
+        self.manual_file_handle = None
+        self.manual_csv_writer = None
+        self.manual_session_id = None
+        self.manual_file = None
+
         self.buffer = []
         self.buffer_size = 500
 
@@ -43,13 +49,25 @@ class CSVLogger(threading.Thread):
             ensure_dirs()
             timestamp_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             log_file = str(logs_dir() / f"log_{timestamp_str}.csv")
+            manual_log_file = str(logs_dir() / f"manual_log_{timestamp_str}.csv")
             try:
+                # Auto log
                 self.file_handle = open(log_file, 'w', newline='', buffering=1)
                 self.csv_writer = csv.writer(self.file_handle)
                 self.csv_writer.writerow(
                     ['timestamp', 'cell_id', 'Fx', 'Fy', 'Fz', 'Mx', 'My', 'Mz'])
-                self.session_id = session_manager.start_session(log_file)
                 self.current_file = log_file
+
+                # Manual log
+                self.manual_file_handle = open(manual_log_file, 'w', newline='', buffering=1)
+                self.manual_csv_writer = csv.writer(self.manual_file_handle)
+                self.manual_csv_writer.writerow(
+                    ['timestamp', 'cell_id', 'Fx', 'Fy', 'Fz', 'Mx', 'My', 'Mz'])
+                self.manual_file = manual_log_file
+
+                # Register single session with both file paths
+                self.session_id = session_manager.start_session(log_file, manual_log_file)
+
                 self.start_time = time.time()
                 self.recording = True
                 return log_file
@@ -69,6 +87,7 @@ class CSVLogger(threading.Thread):
 
         with self._lock:
             self._close_file_locked()
+            self._close_manual_file_locked()
             self._reset_recording_state_locked()
 
         if session_id is not None:
@@ -84,6 +103,19 @@ class CSVLogger(threading.Thread):
                 return
             relative_time = timestamp_absolute - self.start_time
         self.queue.put((relative_time, cell_id, force_moment_values))
+
+    def log_manual_point(self, timestamp_absolute, cell_id, force_moment_values):
+        """Log a single manual point immediately."""
+        with self._lock:
+            if not self.recording or self.manual_csv_writer is None:
+                return
+            relative_time = timestamp_absolute - self.start_time
+            try:
+                row = [f"{relative_time:.6f}", cell_id] + [f"{v:.6f}" for v in force_moment_values]
+                self.manual_csv_writer.writerow(row)
+                self.manual_file_handle.flush()
+            except Exception as e:
+                print(f"Error writing manual point to CSV: {e}")
 
     def stop(self):
         self._stop = True
@@ -107,6 +139,7 @@ class CSVLogger(threading.Thread):
         finally:
             with self._lock:
                 self._close_file_locked()
+                self._close_manual_file_locked()
                 self._reset_recording_state_locked()
 
     # ---- internals ----
@@ -135,8 +168,19 @@ class CSVLogger(threading.Thread):
         self.file_handle = None
         self.csv_writer = None
 
+    def _close_manual_file_locked(self):
+        if self.manual_file_handle:
+            try:
+                self.manual_file_handle.close()
+            except Exception as e:
+                print(f"Error closing manual CSV file: {e}")
+        self.manual_file_handle = None
+        self.manual_csv_writer = None
+
     def _reset_recording_state_locked(self):
         self.recording = False
         self.session_id = None
         self.current_file = None
+        self.manual_session_id = None
+        self.manual_file = None
         self.start_time = None
