@@ -1,4 +1,4 @@
 position_vector:
   x: 1.0
-  y: 1.0
-  z: 1.0
+  y: 0.05
+  z: 0.05
