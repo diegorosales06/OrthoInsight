@@ -47,7 +47,8 @@ The `graphDash/` package is the main codebase, with `graphDash.py` at the repo r
 - `protocol.py` — `s24()` 3-byte signed-int decoder, `Sensor` (real SPI hardware), `DummySensor` (sine+noise simulation).
 - `datastore.py` — `DataStore`: thread-safe ring buffer (`collections.deque` + `threading.Lock`, `MAX_BUFFER_SAMPLES=5000`). `get_cell()` supports windowing to the last N seconds and returns time relative to the window's first sample.
 - `csv_logger.py` — `CSVLogger`: long-lived background `threading.Thread` with per-recording lifecycle (see "Recording lifecycle" below).
-- `sampler.py` — `Sampler`: background thread that polls all cells (real or simulated) at `rate_hz`, pushes readings into `DataStore`, and forwards them to `CSVLogger`. `running` gates whether it's actively sampling; `simulate` gates real vs. dummy sensors — both are toggled live from the UI.
+- `sampler.py` — `Sampler`: background thread that polls all cells (real or simulated) at `rate_hz`, applies force/moment overrides via `force_moment.compute_adjusted()`, then pushes adjusted readings into `DataStore` and forwards them to `CSVLogger`. `running` gates whether it's actively sampling; `simulate` gates real vs. dummy sensors — both are toggled live from the UI.
+- `force_moment.py` — Force/moment override computation (see "Force/moment overrides" below). Contains `PositionVectors` (thread-safe per-tooth-type position vector store) and `compute_adjusted()` (applies threshold-based moment cross-product and force corrections).
 - `session_manager.py` — SQLite operations for session tracking (see "SQLite session database" below).
 - `config.py` — `load_sensor_config()` (YAML) and `build_simulation_cells()` (creates `DummySensor` instances).
 - `paths.py` — Cross-platform path resolution: detects Pi (`/home/sparkrnd` exists) vs. laptop, and returns the appropriate log root, logs directory, and database path.
@@ -56,6 +57,7 @@ The `graphDash/` package is the main codebase, with `graphDash.py` at the repo r
   - `cell_tab.py` — `CellTab`: one tab per load cell with force plot, moment plot, live readouts, tare/clear-tare, and a causal moving-average smoother.
   - `sessions_tab.py` — `SessionsTab`: paginated table of recording sessions with inline CSV viewer (see "Sessions tab" below).
   - `arch_tab.py` — `ArchTab`: dental arch heatmap showing real-time Fz force on a parabolic lower-arch layout (see "Arch View tab" below).
+  - `position_vector_tab.py` — `PositionVectorTab`: per-tooth-type position vector editor for force/moment override parameters (see "Position Vector tab" below).
 
 ### Hardware protocol (repeated in every entry point)
 
@@ -107,14 +109,41 @@ Resolved by `graphDash/paths.py`:
 
 ### Sensor configuration
 
-`config/sensors.yaml` lists cells as `{name, bus, dev, csb_gpio, tooth}` (SPI bus/device, the GPIO used for chip-select, and an optional Universal tooth number for the arch heatmap). Bus/GPIO numbers here are physical wiring facts about the current rig — don't "fix" values that look inconsistent (e.g. two cells sharing a bus) without confirming with the user, since they reflect actual hardware, not bugs. `pi_sender.py` and `cell_dashboard.py` hardcode a 4-cell config in source instead of reading this YAML.
+`config/sensors.yaml` lists cells as `{name, bus, dev, csb_gpio, tooth, tooth_type}` (SPI bus/device, the GPIO used for chip-select, an optional Universal tooth number for the arch heatmap, and a tooth type for force/moment overrides). Bus/GPIO numbers here are physical wiring facts about the current rig — don't "fix" values that look inconsistent (e.g. two cells sharing a bus) without confirming with the user, since they reflect actual hardware, not bugs. `pi_sender.py` and `cell_dashboard.py` hardcode a 4-cell config in source instead of reading this YAML.
 
 The `tooth` field (optional) maps a sensor to a specific tooth in the lower dental arch using Universal numbering (17–32). This drives the Arch View heatmap tab.
 
+The `tooth_type` field (optional) assigns a tooth category — `central_incisor`, `premolar`, or `molar` — which determines the default position vector (specifically the default `h` value) used for force/moment override computations. When present, the sampler applies `compute_adjusted()` from `force_moment.py` to each sample before storing/logging.
+
+### Force/moment overrides
+
+`force_moment.py` applies threshold-based overrides to raw sensor readings. Each cell's `tooth_type` (from `sensors.yaml`) determines which position vector `r = [x, d+w, h]` to use. An additional parameter `d` (sensor radius) is needed for one of the force corrections. The `PositionVectors` class stores per-tooth-type vectors with thread-safe access; the UI tab writes to it, the sampler reads from it.
+
+**Position vector defaults:**
+
+| Tooth type | x | d+w | h | d |
+|---|---|---|---|---|
+| Central incisor | 0.0 | 9.5 | 17.15 | 4.8 |
+| Premolar | 0.0 | 9.5 | 14.9 | 4.8 |
+| Molar | 0.0 | 9.5 | 15.4 | 4.8 |
+
+**Moment** — always computed as `r × F` (cross product) using raw forces, never raw sensor Mx/My/Mz. Full cross product: `M = [y*Fz − z*Fy, z*Fx − x*Fz, x*Fy − y*Fx]` where `x=x, y=d+w, z=h`. Then:
+- Condition 1 (`|Fx| >= 0.3 N`): drop the `−y*Fx` term from Mz
+- Condition 2 (`|Fz| >= 0.3 N`): drop the `y*Fz` term from Mx
+
+When both conditions met: `M = [−z*Fy, z*Fx − x*Fz, x*Fy]`. When neither: full cross product (no terms dropped).
+
+**Force** — adjustments to Fz only; Fx and Fy pass through unchanged. Both deltas use the original raw Fz (independent, additive):
+- Condition 3 (`|Fy| >= 0.3 N`): `Fz += −(h * Fy) / (d+w)`
+- Condition 4 (`|Fz| >= 0.3 N`): `Fz += (Fz * (d+w)) / d`
+
+Moment computation always uses raw forces even when conditions 3/4 adjust the displayed force values. The adjusted values are what get stored in `DataStore` and logged to CSV.
+
 ### Dashboard tabs
 
-- **Cell tabs** (one per load cell): force/moment time-series plots (PyQtGraph), live readout labels, tare/clear-tare controls, causal moving-average smoother (`_moving_avg`, no lookahead).
+- **Cell tabs** (one per load cell): force/moment time-series plots (PyQtGraph), live readout labels, tare/clear-tare controls, causal moving-average smoother (`_moving_avg`, no lookahead). Plots show the adjusted (overridden) force/moment values when a cell has a `tooth_type` configured.
 - **Arch View** (`ArchTab`): lower dental arch (teeth 17–32) rendered via `QPainter` on a parabolic curve. Teeth are drawn with type-specific shapes (rounded rects for molars/premolars/incisors, pentagons for canines) and cusp hints (small circles). Mapped teeth are filled with a Fz-based heatmap color; unmapped teeth have dashed outlines and no fill. Color scale: gray ≤ 0.5 N, green→yellow at 0.5→1.25 N, yellow→red at 1.25→2.0 N, capped red above. Includes a gradient color bar legend. Refreshes every `REFRESH_MS` (50 ms).
+- **Position Vector** (`PositionVectorTab`): per-tooth-type position vector editor. Dropdown selects tooth type (central incisor, premolar, molar); editable fields for x, d+w, h, and d. Changing the tooth type loads that type's current values. Edits take effect immediately on the next sample cycle. A "Reset to Defaults" button restores the selected type's factory values.
 - **Sessions** (`SessionsTab`): paginated table (20 rows/page) of all recording sessions from the SQLite database. In-progress sessions show "— recording —" in red. Clicking a file path opens an inline CSV viewer (first 500 rows). Auto-refreshes every 2 seconds. Missing files show an error message instead of crashing.
 
 ### Deployment
