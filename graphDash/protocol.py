@@ -101,8 +101,8 @@ class DummySensor:
         #     noise = 0.02 * np.sin(2 * np.pi * (self.frequency * 3) * t + axis)
         #     values.append(float(self.amplitude * (base + noise)))
 
-        values.append(0) # Fx
-        values.append(-4.0) # Fy
+        values.append(-4.0) # Fx
+        values.append(0) # Fy
         values.append(0) # Fz
         values.append(0) # Mx
         values.append(0) # My

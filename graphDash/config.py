@@ -12,6 +12,24 @@ def load_sensor_config(path):
         return yaml.safe_load(file)
 
 
+def save_sensor_config(path, sensors):
+    ordered = []
+    for s in sensors:
+        entry = {}
+        entry["name"] = s.get("name", "")
+        entry["bus"] = s.get("bus", 0)
+        entry["dev"] = s.get("dev", 0)
+        entry["csb_gpio"] = s.get("csb_gpio", 0)
+        if s.get("tooth") is not None:
+            entry["tooth"] = s["tooth"]
+        if s.get("tooth_type"):
+            entry["tooth_type"] = s["tooth_type"]
+        ordered.append(entry)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as f:
+        yaml.dump({"sensors": ordered}, f, default_flow_style=False, sort_keys=False)
+
+
 def build_simulation_cells(names):
     cells = []
     for i, name in enumerate(names):

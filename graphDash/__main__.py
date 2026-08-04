@@ -95,9 +95,12 @@ def main(argv=None):
     else:
         tooth_types = tooth_types[:n_cells]
 
+    sensor_configs = config.get('sensors', []) if config else []
+
     app = QApplication([sys.argv[0]])
     win = Dashboard(sampler, store, n_cells, csv_logger=csv_logger,
-                    tooth_per_cell=teeth, pos_vectors=pos_vectors)
+                    tooth_per_cell=teeth, pos_vectors=pos_vectors,
+                    config_path=args.config, sensor_configs=sensor_configs)
     win.show()
 
     exit_code = app.exec()

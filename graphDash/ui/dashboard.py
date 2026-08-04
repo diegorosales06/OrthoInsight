@@ -10,16 +10,21 @@ from graphDash.ui.cell_tab import CellTab
 from graphDash.ui.sessions_tab import SessionsTab
 from graphDash.ui.arch_tab import ArchTab
 from graphDash.ui.position_vector_tab import PositionVectorTab
+from graphDash.ui.sensor_config_tab import SensorConfigTab
 
 
 class Dashboard(QMainWindow):
-    def __init__(self, sampler, store, n_cells, csv_logger=None, tooth_per_cell=None, pos_vectors=None):
+    def __init__(self, sampler, store, n_cells, csv_logger=None, tooth_per_cell=None, pos_vectors=None,
+                 config_path=None, sensor_configs=None):
         super().__init__()
         self.sampler = sampler
         self.store = store
         self.csv_logger = csv_logger
         self.tooth_per_cell = tooth_per_cell or []
         self.pos_vectors = pos_vectors
+        self.config_path = config_path
+        self.sensor_configs = sensor_configs or []
+        self.n_cells = n_cells
         self.setWindowTitle("Load Cell Dashboard")
         self.resize(900, 750)
 
@@ -105,20 +110,24 @@ class Dashboard(QMainWindow):
         root.addLayout(ctrl)
 
         # ---- Tabs ----
-        tabs = QTabWidget()
+        self.tabs = QTabWidget()
         self.cell_tabs = []
         for i in range(n_cells):
             tab = CellTab(i, store)
-            tabs.addTab(tab, f"Cell {i+1}")
+            self.tabs.addTab(tab, f"Cell {i+1}")
             self.cell_tabs.append(tab)
         self.arch_tab = ArchTab(store, tooth_per_cell=self.tooth_per_cell)
-        tabs.addTab(self.arch_tab, "Arch View")
+        self.tabs.addTab(self.arch_tab, "Arch View")
         if self.pos_vectors:
             self.pos_vector_tab = PositionVectorTab(self.pos_vectors)
-            tabs.addTab(self.pos_vector_tab, "Position Vector")
+            self.tabs.addTab(self.pos_vector_tab, "Position Vector")
         self.sessions_tab = SessionsTab()
-        tabs.addTab(self.sessions_tab, "Sessions")
-        root.addWidget(tabs, 1)
+        self.tabs.addTab(self.sessions_tab, "Sessions")
+        if self.config_path:
+            self.sensor_config_tab = SensorConfigTab(self.sensor_configs, self.config_path)
+            self.sensor_config_tab.config_changed.connect(self._on_config_changed)
+            self.tabs.addTab(self.sensor_config_tab, "Sensor Config")
+        root.addWidget(self.tabs, 1)
 
         # ---- Refresh timer ----
         self.timer = QTimer(self)
@@ -180,6 +189,34 @@ class Dashboard(QMainWindow):
             if len(t) > 0:
                 force_moment = [arr[-1] for arr in arrs]
                 self.csv_logger.log_manual_point(timestamp, f"Cell {cell_idx + 1}", force_moment)
+
+    def _on_config_changed(self, sensors):
+        if self.start_btn.isChecked():
+            self.start_btn.setChecked(False)
+            self._toggle_run()
+
+        n = min(len(sensors), self.n_cells)
+        names = [s.get("name", f"Cell {i+1}") for i, s in enumerate(sensors)]
+        tooth_types = [s.get("tooth_type") for s in sensors]
+        teeth = [s.get("tooth") for s in sensors]
+
+        self.sampler.cell_names = names
+        self.sampler.cell_tooth_types = tooth_types
+        self.tooth_per_cell = teeth
+
+        if hasattr(self.arch_tab, 'tooth_per_cell'):
+            self.arch_tab.tooth_per_cell = teeth[:self.n_cells]
+
+        for i in range(n):
+            self.tabs.setTabText(i, names[i])
+
+        self.store.clear()
+
+        if len(sensors) != self.n_cells:
+            self.sensor_config_tab.status_label.setText(
+                "Config saved. Restart app for cell count changes to take effect.")
+            self.sensor_config_tab.status_label.setStyleSheet(
+                "color: #e67e22; font-weight: bold;")
 
     def _refresh(self):
         for t in self.cell_tabs:
