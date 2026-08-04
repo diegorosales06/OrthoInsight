@@ -9,15 +9,17 @@ from graphDash.constants import DEFAULT_RATE_HZ, REFRESH_MS
 from graphDash.ui.cell_tab import CellTab
 from graphDash.ui.sessions_tab import SessionsTab
 from graphDash.ui.arch_tab import ArchTab
+from graphDash.ui.position_vector_tab import PositionVectorTab
 
 
 class Dashboard(QMainWindow):
-    def __init__(self, sampler, store, n_cells, csv_logger=None, tooth_per_cell=None):
+    def __init__(self, sampler, store, n_cells, csv_logger=None, tooth_per_cell=None, pos_vectors=None):
         super().__init__()
         self.sampler = sampler
         self.store = store
         self.csv_logger = csv_logger
         self.tooth_per_cell = tooth_per_cell or []
+        self.pos_vectors = pos_vectors
         self.setWindowTitle("Load Cell Dashboard")
         self.resize(900, 750)
 
@@ -111,6 +113,9 @@ class Dashboard(QMainWindow):
             self.cell_tabs.append(tab)
         self.arch_tab = ArchTab(store, tooth_per_cell=self.tooth_per_cell)
         tabs.addTab(self.arch_tab, "Arch View")
+        if self.pos_vectors:
+            self.pos_vector_tab = PositionVectorTab(self.pos_vectors)
+            tabs.addTab(self.pos_vector_tab, "Position Vector")
         self.sessions_tab = SessionsTab()
         tabs.addTab(self.sessions_tab, "Sessions")
         root.addWidget(tabs, 1)

@@ -8,6 +8,7 @@ from graphDash.protocol import Sensor
 from graphDash.config import load_sensor_config, build_simulation_cells
 from graphDash.datastore import DataStore
 from graphDash.csv_logger import CSVLogger
+from graphDash.force_moment import PositionVectors
 from graphDash.sampler import Sampler
 from graphDash.ui.dashboard import Dashboard
 
@@ -28,10 +29,12 @@ def main(argv=None):
     config = load_sensor_config(args.config)
     names = []
     teeth = []
+    tooth_types = []
     if config and isinstance(config.get('sensors'), list):
         names = [sensor.get('name', f"Cell {i+1}")
                  for i, sensor in enumerate(config['sensors'])]
         teeth = [sensor.get('tooth') for sensor in config['sensors']]
+        tooth_types = [sensor.get('tooth_type') for sensor in config['sensors']]
 
     if args.debug:
         if args.cells is not None:
@@ -40,12 +43,15 @@ def main(argv=None):
                 names += [f"Cell {len(names) + j + 1}"
                           for j in range(n_cells - len(names))]
                 teeth += [None] * (n_cells - len(teeth))
+                tooth_types += [None] * (n_cells - len(tooth_types))
             else:
                 names = names[:n_cells]
                 teeth = teeth[:n_cells]
+                tooth_types = tooth_types[:n_cells]
         elif not names:
             names = ["Cell 1"]
             teeth = [None]
+            tooth_types = [None]
         cells = []
         simulation_cells = build_simulation_cells(names)
         print(f"Starting in debug mode with {len(simulation_cells)} simulated cells.")
@@ -72,19 +78,26 @@ def main(argv=None):
     csv_logger = CSVLogger()
     csv_logger.start()
 
+    pos_vectors = PositionVectors()
+
     sampler = Sampler(cells, store, simulation_cells=simulation_cells, simulate=args.debug,
-                      csv_logger=csv_logger, cell_names=names)
+                      csv_logger=csv_logger, cell_names=names,
+                      pos_vectors=pos_vectors, cell_tooth_types=tooth_types)
     sampler.start()
 
-    # Ensure teeth list matches n_cells (defensive; real-hardware path already parallel)
+    # Ensure teeth/tooth_types lists match n_cells
     if len(teeth) < n_cells:
         teeth += [None] * (n_cells - len(teeth))
     else:
         teeth = teeth[:n_cells]
+    if len(tooth_types) < n_cells:
+        tooth_types += [None] * (n_cells - len(tooth_types))
+    else:
+        tooth_types = tooth_types[:n_cells]
 
     app = QApplication([sys.argv[0]])
     win = Dashboard(sampler, store, n_cells, csv_logger=csv_logger,
-                    tooth_per_cell=teeth)
+                    tooth_per_cell=teeth, pos_vectors=pos_vectors)
     win.show()
 
     exit_code = app.exec()
