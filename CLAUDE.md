@@ -42,8 +42,8 @@ There is no lint or test command configured — verify changes by running `graph
 
 The `graphDash/` package is the main codebase, with `graphDash.py` at the repo root as a thin entry-point shim:
 
-- `__main__.py` — entry point: arg parsing, config loading, DB init, thread wiring, Qt event loop.
-- `constants.py` — MMS101 command bytes, axis names/colors, UI defaults (`REFRESH_MS`, `MAX_BUFFER_SAMPLES`, etc.).
+- `__main__.py` — entry point: arg parsing, config loading, DB init, thread wiring, pyqtgraph global config, `theme.apply(app)`, Qt event loop.
+- `constants.py` — MMS101 command bytes, axis names/colors (colorblind-safe `tab10` palette), UI defaults (`REFRESH_MS`, `MAX_BUFFER_SAMPLES`, etc.).
 - `protocol.py` — `s24()` 3-byte signed-int decoder, `Sensor` (real SPI hardware), `DummySensor` (sine+noise simulation).
 - `datastore.py` — `DataStore`: thread-safe ring buffer (`collections.deque` + `threading.Lock`, `MAX_BUFFER_SAMPLES=5000`). `get_cell()` supports windowing to the last N seconds and returns time relative to the window's first sample.
 - `csv_logger.py` — `CSVLogger`: long-lived background `threading.Thread` with per-recording lifecycle (see "Recording lifecycle" below).
@@ -53,11 +53,13 @@ The `graphDash/` package is the main codebase, with `graphDash.py` at the repo r
 - `config.py` — `load_sensor_config()` (YAML) and `build_simulation_cells()` (creates `DummySensor` instances).
 - `paths.py` — Cross-platform path resolution: detects Pi (`/home/sparkrnd` exists) vs. laptop, and returns the appropriate log root, logs directory, and database path.
 - `ui/` — PyQt6 UI widgets:
-  - `dashboard.py` — `Dashboard` main window: control bar (start/stop, sample rate, rolling window, moving-average, debug toggle, clear data) plus tabbed content area.
-  - `cell_tab.py` — `CellTab`: one tab per load cell with force plot, moment plot, live readouts, tare/clear-tare, and a causal moving-average smoother.
-  - `sessions_tab.py` — `SessionsTab`: paginated table of recording sessions with inline CSV viewer (see "Sessions tab" below).
-  - `arch_tab.py` — `ArchTab`: dental arch heatmap showing real-time Fz force on a parabolic lower-arch layout (see "Arch View tab" below).
+  - `theme.py` — centralized design tokens (colors, typography scale, spacing) and a global QSS stylesheet applied via `theme.apply(app)`. All UI colors are defined here — components reference `theme.PRIMARY`, `theme.ON_SURFACE`, etc. instead of hardcoding hex values. The palette is white + dark blue (`#055CA3` primary) with semantic accents (coral for danger/stop, amber for debug mode, muted green for success). Plot curve colors remain in `constants.py` since they're data-level, not chrome-level.
+  - `dashboard.py` — `Dashboard` main window: header with title + live status indicator (Idle / Recording), control bar in a rounded card (start/stop, sample rate, rolling window, smoothing, log point, clear data, debug toggle) plus tabbed content area. Buttons use semantic variants via QSS dynamic properties (`variant="primary"`, `"danger"`, `"accent"`).
+  - `cell_tab.py` — `CellTab`: one tab per load cell with force plot, moment plot, live readouts, tare/clear-tare, and a causal moving-average smoother. Plots are wrapped in rounded card frames with themed axis/grid/legend styling. Readouts are monospace pill cards with a left color-accent bar.
+  - `sessions_tab.py` — `SessionsTab`: paginated table of recording sessions with inline CSV viewer (see "Sessions tab" below). Tables use alternating row colors from theme.
+  - `arch_tab.py` — `ArchTab`: dental arch heatmap showing real-time Fz force on a parabolic lower-arch layout (see "Arch View tab" below). Text and outlines use theme tokens; the functional heatmap palette (gray→green→yellow→red) is independent.
   - `position_vector_tab.py` — `PositionVectorTab`: per-tooth-type position vector editor for force/moment override parameters (see "Position Vector tab" below).
+  - `sensor_config_tab.py` — `SensorConfigTab`: editable table of sensor configs with add/remove; saves to `sensors.yaml` on change.
 
 ### Hardware protocol (repeated in every entry point)
 
