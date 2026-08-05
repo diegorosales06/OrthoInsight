@@ -1,9 +1,11 @@
 import argparse
 import sys
 
+import pyqtgraph as pg
 from PyQt6.QtWidgets import QApplication
 
 from graphDash import session_manager
+from graphDash.ui import theme
 from graphDash.protocol import Sensor
 from graphDash.config import load_sensor_config, build_simulation_cells
 from graphDash.datastore import DataStore
@@ -98,6 +100,8 @@ def main(argv=None):
     sensor_configs = config.get('sensors', []) if config else []
 
     app = QApplication([sys.argv[0]])
+    pg.setConfigOptions(antialias=True, background=theme.PLOT_BG, foreground=theme.PLOT_FG)
+    theme.apply(app)
     win = Dashboard(sampler, store, n_cells, csv_logger=csv_logger,
                     tooth_per_cell=teeth, pos_vectors=pos_vectors,
                     config_path=args.config, sensor_configs=sensor_configs)

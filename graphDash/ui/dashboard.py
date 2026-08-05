@@ -1,16 +1,32 @@
 from PyQt6.QtWidgets import (
     QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QSpinBox, QComboBox,
+    QLabel, QPushButton, QSpinBox, QComboBox, QFrame,
 )
-from PyQt6.QtCore import QTimer
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import QTimer, Qt
 
 from graphDash.constants import DEFAULT_RATE_HZ, REFRESH_MS
+from graphDash.ui import theme
 from graphDash.ui.cell_tab import CellTab
 from graphDash.ui.sessions_tab import SessionsTab
 from graphDash.ui.arch_tab import ArchTab
 from graphDash.ui.position_vector_tab import PositionVectorTab
 from graphDash.ui.sensor_config_tab import SensorConfigTab
+
+
+def _labeled_control(label_text, widget):
+    """Vertical stack: small label above a control. Keeps the control bar
+    scannable without inline colons."""
+    box = QVBoxLayout()
+    box.setSpacing(2)
+    box.setContentsMargins(0, 0, 0, 0)
+    lbl = QLabel(label_text)
+    lbl.setProperty("muted", True)
+    lbl.setStyleSheet(f"font-size: {theme.FONT_CAPTION}pt; color: {theme.ON_SURFACE_MUTED};")
+    box.addWidget(lbl)
+    box.addWidget(widget)
+    wrap = QWidget()
+    wrap.setLayout(box)
+    return wrap
 
 
 class Dashboard(QMainWindow):
@@ -25,92 +41,118 @@ class Dashboard(QMainWindow):
         self.config_path = config_path
         self.sensor_configs = sensor_configs or []
         self.n_cells = n_cells
-        self.setWindowTitle("Load Cell Dashboard")
-        self.resize(900, 750)
+        self.setWindowTitle("OrthoInsight — Load Cell Dashboard")
+        self.resize(1100, 800)
 
         central = QWidget()
         root = QVBoxLayout()
+        root.setContentsMargins(18, 16, 18, 16)
+        root.setSpacing(14)
         central.setLayout(root)
         self.setCentralWidget(central)
 
-        # ---- Control bar ----
-        ctrl_font = QFont(); ctrl_font.setPointSize(11)
-        ctrl = QHBoxLayout()
+        # ---- Header ----
+        header_row = QHBoxLayout()
+        header_row.setSpacing(12)
+        title = QLabel("OrthoInsight")
+        title.setProperty("role", "title")
+        header_row.addWidget(title)
+        header_row.addStretch()
 
-        # Start / Stop
-        self.start_btn = QPushButton("Start")
-        self.start_btn.setFont(ctrl_font)
-        self.start_btn.setMinimumHeight(40)
-        self.start_btn.setMinimumWidth(100)
+        self.status_dot = QLabel("●")
+        self.status_dot.setStyleSheet(f"color: {theme.ON_SURFACE_SUBTLE}; font-size: 14pt;")
+        self.status_text = QLabel("Idle")
+        self.status_text.setProperty("muted", True)
+        self.status_text.setStyleSheet(f"color: {theme.ON_SURFACE_MUTED}; font-size: {theme.FONT_BODY}pt;")
+        header_row.addWidget(self.status_dot)
+        header_row.addWidget(self.status_text)
+        root.addLayout(header_row)
+
+        # subtle divider under the header
+        divider = QFrame()
+        divider.setFrameShape(QFrame.Shape.HLine)
+        divider.setStyleSheet(f"color: {theme.OUTLINE}; background-color: {theme.OUTLINE}; max-height: 1px;")
+        root.addWidget(divider)
+
+        # ---- Control bar ----
+        ctrl_container = QFrame()
+        ctrl_container.setStyleSheet(
+            f"QFrame {{ background-color: {theme.SURFACE_ALT}; "
+            f"border: 1px solid {theme.OUTLINE}; border-radius: 10px; }}"
+        )
+        ctrl = QHBoxLayout()
+        ctrl.setContentsMargins(14, 12, 14, 12)
+        ctrl.setSpacing(14)
+        ctrl_container.setLayout(ctrl)
+
+        # Start / Stop — primary action
+        self.start_btn = QPushButton("Start Recording")
+        self.start_btn.setMinimumHeight(42)
+        self.start_btn.setMinimumWidth(160)
         self.start_btn.setCheckable(True)
+        self.start_btn.setProperty("variant", "primary")
+        self.start_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.start_btn.clicked.connect(self._toggle_run)
         ctrl.addWidget(self.start_btn)
 
         # Sampling rate
-        rate_label = QLabel("  Rate (Hz):")
-        rate_label.setFont(ctrl_font)
-        ctrl.addWidget(rate_label)
         self.rate_spin = QSpinBox()
         self.rate_spin.setRange(1, 100)
         self.rate_spin.setValue(DEFAULT_RATE_HZ)
-        self.rate_spin.setFont(ctrl_font)
+        self.rate_spin.setMinimumWidth(80)
         self.rate_spin.valueChanged.connect(self._rate_changed)
-        ctrl.addWidget(self.rate_spin)
+        ctrl.addWidget(_labeled_control("SAMPLE RATE (Hz)", self.rate_spin))
 
         # Rolling window
-        win_label = QLabel("  Window (s):")
-        win_label.setFont(ctrl_font)
-        ctrl.addWidget(win_label)
         self.win_combo = QComboBox()
-        self.win_combo.setFont(ctrl_font)
         for s in [5, 10, 20, 30, 60]:
-            self.win_combo.addItem(str(s), s)
+            self.win_combo.addItem(f"{s}s", s)
         self.win_combo.setCurrentIndex(1)  # 10 s default
+        self.win_combo.setMinimumWidth(80)
         self.win_combo.currentIndexChanged.connect(self._window_changed)
-        ctrl.addWidget(self.win_combo)
+        ctrl.addWidget(_labeled_control("WINDOW", self.win_combo))
 
         # Moving average
-        ma_label = QLabel("  MA (samples):")
-        ma_label.setFont(ctrl_font)
-        ctrl.addWidget(ma_label)
         self.ma_spin = QSpinBox()
         self.ma_spin.setRange(1, 200)
         self.ma_spin.setValue(1)
-        self.ma_spin.setFont(ctrl_font)
+        self.ma_spin.setMinimumWidth(80)
         self.ma_spin.setToolTip("Moving average window in samples (1 = off)")
         self.ma_spin.valueChanged.connect(self._ma_changed)
-        ctrl.addWidget(self.ma_spin)
+        ctrl.addWidget(_labeled_control("SMOOTHING", self.ma_spin))
 
-        # Debug / simulation mode
+        ctrl.addStretch()
+
+        # Log Point (manual logging) — ghost
+        self.log_point_btn = QPushButton("Log Point")
+        self.log_point_btn.setMinimumHeight(38)
+        self.log_point_btn.setEnabled(False)
+        self.log_point_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.log_point_btn.clicked.connect(self._log_manual_point)
+        ctrl.addWidget(self.log_point_btn)
+
+        # Clear data — ghost
+        clear_btn = QPushButton("Clear Data")
+        clear_btn.setMinimumHeight(38)
+        clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        clear_btn.clicked.connect(self._clear_data)
+        ctrl.addWidget(clear_btn)
+
+        # Debug / simulation mode — accent when on
         self.debug_btn = QPushButton("Debug Mode")
-        self.debug_btn.setFont(ctrl_font)
-        self.debug_btn.setMinimumHeight(40)
+        self.debug_btn.setMinimumHeight(38)
         self.debug_btn.setCheckable(True)
         self.debug_btn.setChecked(self.sampler.simulate)
+        self.debug_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.debug_btn.clicked.connect(self._toggle_debug)
         ctrl.addWidget(self.debug_btn)
         self._toggle_debug()
 
-        # Clear data
-        clear_btn = QPushButton("Clear Data")
-        clear_btn.setFont(ctrl_font)
-        clear_btn.setMinimumHeight(40)
-        clear_btn.clicked.connect(self._clear_data)
-        ctrl.addWidget(clear_btn)
-
-        # Log Point (manual logging)
-        self.log_point_btn = QPushButton("Log Point")
-        self.log_point_btn.setFont(ctrl_font)
-        self.log_point_btn.setMinimumHeight(40)
-        self.log_point_btn.setEnabled(False)
-        self.log_point_btn.clicked.connect(self._log_manual_point)
-        ctrl.addWidget(self.log_point_btn)
-
-        ctrl.addStretch()
-        root.addLayout(ctrl)
+        root.addWidget(ctrl_container)
 
         # ---- Tabs ----
         self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
         self.cell_tabs = []
         for i in range(n_cells):
             tab = CellTab(i, store)
@@ -134,32 +176,53 @@ class Dashboard(QMainWindow):
         self.timer.timeout.connect(self._refresh)
         self.timer.start(REFRESH_MS)
 
+    def _set_status(self, state):
+        if state == "recording":
+            self.status_dot.setStyleSheet(f"color: {theme.ACCENT_DANGER}; font-size: 14pt;")
+            self.status_text.setText("Recording")
+            self.status_text.setStyleSheet(
+                f"color: {theme.ACCENT_DANGER}; font-size: {theme.FONT_BODY}pt; font-weight: 600;")
+        else:
+            self.status_dot.setStyleSheet(f"color: {theme.ON_SURFACE_SUBTLE}; font-size: 14pt;")
+            self.status_text.setText("Idle")
+            self.status_text.setStyleSheet(
+                f"color: {theme.ON_SURFACE_MUTED}; font-size: {theme.FONT_BODY}pt;")
+
+    def _restyle(self, btn):
+        """Force a QSS re-evaluation after changing a dynamic property."""
+        btn.style().unpolish(btn)
+        btn.style().polish(btn)
+
     def _toggle_run(self):
         if self.start_btn.isChecked():
             if self.csv_logger:
                 self.csv_logger.start_recording()
             self.sampler.running = True
-            self.start_btn.setText("Stop")
-            self.start_btn.setStyleSheet(
-                "background-color: #e74c3c; color: white;")
+            self.start_btn.setText("Stop Recording")
+            self.start_btn.setProperty("variant", "danger")
+            self._restyle(self.start_btn)
             self.log_point_btn.setEnabled(True)
+            self._set_status("recording")
         else:
             self.sampler.running = False
             if self.csv_logger:
                 self.csv_logger.stop_recording()
-            self.start_btn.setText("Start")
-            self.start_btn.setStyleSheet("")
+            self.start_btn.setText("Start Recording")
+            self.start_btn.setProperty("variant", "primary")
+            self._restyle(self.start_btn)
             self.log_point_btn.setEnabled(False)
             self.sessions_tab.refresh()
+            self._set_status("idle")
 
     def _toggle_debug(self):
         self.sampler.simulate = self.debug_btn.isChecked()
         if self.sampler.simulate:
             self.debug_btn.setText("Debug Mode: ON")
-            self.debug_btn.setStyleSheet("background-color: #3498db; color: white;")
+            self.debug_btn.setProperty("variant", "accent")
         else:
             self.debug_btn.setText("Debug Mode: OFF")
-            self.debug_btn.setStyleSheet("")
+            self.debug_btn.setProperty("variant", "")
+        self._restyle(self.debug_btn)
 
     def _rate_changed(self, val):
         self.sampler.rate_hz = val
@@ -216,7 +279,7 @@ class Dashboard(QMainWindow):
             self.sensor_config_tab.status_label.setText(
                 "Config saved. Restart app for cell count changes to take effect.")
             self.sensor_config_tab.status_label.setStyleSheet(
-                "color: #e67e22; font-weight: bold;")
+                f"color: {theme.ACCENT_WARNING}; font-weight: 600;")
 
     def _refresh(self):
         for t in self.cell_tabs:

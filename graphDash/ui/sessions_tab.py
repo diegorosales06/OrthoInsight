@@ -6,9 +6,10 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
 )
 from PyQt6.QtCore import QTimer, Qt
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QColor
 
 from graphDash import session_manager
+from graphDash.ui import theme
 
 PAGE_SIZE = 20
 REFRESH_MS = 2000
@@ -26,7 +27,17 @@ class SessionsTab(QWidget):
         self._last_signature = None
 
         layout = QVBoxLayout()
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(10)
+
+        title = QLabel("Recording Sessions")
+        title.setProperty("role", "section")
+        title.setStyleSheet(f"font-size: {theme.FONT_SECTION}pt; font-weight: 600; color: {theme.ON_SURFACE};")
+        layout.addWidget(title)
+
+        sub = QLabel("Click a filename to preview its CSV contents.")
+        sub.setStyleSheet(f"color: {theme.ON_SURFACE_MUTED}; font-size: {theme.FONT_BODY}pt;")
+        layout.addWidget(sub)
 
         # ---- Sessions table ----
         self.table = QTableWidget(0, 4)
@@ -34,6 +45,7 @@ class SessionsTab(QWidget):
             ["ID", "Start", "End", "File"])
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
@@ -56,7 +68,7 @@ class SessionsTab(QWidget):
         self.page_label.setFont(ctrl_font)
         self.count_label = QLabel("0 sessions")
         self.count_label.setFont(ctrl_font)
-        self.count_label.setStyleSheet("color: gray;")
+        self.count_label.setStyleSheet(f"color: {theme.ON_SURFACE_MUTED};")
         pag_row.addWidget(self.prev_btn)
         pag_row.addWidget(self.page_label)
         pag_row.addWidget(self.next_btn)
@@ -68,7 +80,7 @@ class SessionsTab(QWidget):
         viewer_hdr = QHBoxLayout()
         self.viewer_title = QLabel("No file selected")
         self.viewer_title.setFont(ctrl_font)
-        self.viewer_title.setStyleSheet("color: gray;")
+        self.viewer_title.setStyleSheet(f"color: {theme.ON_SURFACE_MUTED};")
         self.toggle_log_btn = QPushButton("Show Manual Log")
         self.toggle_log_btn.setFont(ctrl_font)
         self.toggle_log_btn.clicked.connect(self._toggle_log_view)
@@ -84,13 +96,14 @@ class SessionsTab(QWidget):
 
         # ---- Viewer status (missing file / in-progress note) ----
         self.viewer_status = QLabel("")
-        self.viewer_status.setStyleSheet("color: #b58900;")
+        self.viewer_status.setStyleSheet(f"color: {theme.ACCENT_WARNING}; font-weight: 600;")
         self.viewer_status.setVisible(False)
         layout.addWidget(self.viewer_status)
 
         # ---- CSV viewer table ----
         self.viewer = QTableWidget(0, 0)
         self.viewer.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.viewer.setAlternatingRowColors(True)
         self.viewer.verticalHeader().setVisible(False)
         self.viewer.setVisible(False)
         layout.addWidget(self.viewer, 3)
@@ -141,7 +154,8 @@ class SessionsTab(QWidget):
             end = r["end_time"] if r["end_time"] else "— recording —"
             end_item = QTableWidgetItem(end)
             if not r["end_time"]:
-                end_item.setForeground(Qt.GlobalColor.red)
+                end_item.setForeground(QColor(theme.ACCENT_DANGER))
+                f = end_item.font(); f.setBold(True); end_item.setFont(f)
             self.table.setItem(i, 2, end_item)
 
             # Display both auto-log and manual-log in one cell
@@ -154,7 +168,7 @@ class SessionsTab(QWidget):
                 display_text = auto_name
 
             path_item = QTableWidgetItem(display_text)
-            path_item.setForeground(Qt.GlobalColor.blue)
+            path_item.setForeground(QColor(theme.PRIMARY_PRESSED))
             path_item.setToolTip("Click to view CSV")
             path_item.setData(Qt.ItemDataRole.UserRole, r["file_path"])
             path_item.setData(Qt.ItemDataRole.UserRole + 1, r["end_time"])
@@ -191,7 +205,8 @@ class SessionsTab(QWidget):
     def _show_csv(self, path, in_progress=False):
         self.viewer_visible = True
         self.viewer_title.setText(f"Selected: {os.path.basename(path)}")
-        self.viewer_title.setStyleSheet("color: black;")
+        self.viewer_title.setStyleSheet(
+            f"color: {theme.ON_SURFACE}; font-weight: 600;")
         self.hide_btn.setVisible(True)
 
         # Show toggle button only if manual log exists
@@ -268,4 +283,4 @@ class SessionsTab(QWidget):
         self.hide_btn.setVisible(False)
         self.toggle_log_btn.setVisible(False)
         self.viewer_title.setText("No file selected")
-        self.viewer_title.setStyleSheet("color: gray;")
+        self.viewer_title.setStyleSheet(f"color: {theme.ON_SURFACE_MUTED};")

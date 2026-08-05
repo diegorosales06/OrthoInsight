@@ -3,7 +3,9 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QComboBox, QHeaderView, QMessageBox,
 )
 from PyQt6.QtGui import QFont
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import pyqtSignal, Qt
+
+from graphDash.ui import theme
 
 
 _TOOTH_TYPE_OPTIONS = ["", "central_incisor", "premolar", "molar"]
@@ -25,23 +27,20 @@ class SensorConfigTab(QWidget):
         self._building = False
 
         layout = QVBoxLayout()
-        layout.setContentsMargins(20, 20, 20, 20)
-
-        header_font = QFont()
-        header_font.setPointSize(13)
-        header_font.setBold(True)
+        layout.setContentsMargins(24, 22, 24, 22)
+        layout.setSpacing(10)
 
         title = QLabel("Sensor Configuration")
-        title.setFont(header_font)
+        title.setStyleSheet(
+            f"font-size: {theme.FONT_SECTION}pt; font-weight: 600; color: {theme.ON_SURFACE};")
         layout.addWidget(title)
 
         sub = QLabel("Edit sensor settings. Changes save to sensors.yaml immediately and stop any active recording.")
-        sub.setStyleSheet("color: gray;")
+        sub.setStyleSheet(f"color: {theme.ON_SURFACE_MUTED}; font-size: {theme.FONT_BODY}pt;")
         layout.addWidget(sub)
-        layout.addSpacing(10)
 
         self.status_label = QLabel("")
-        self.status_label.setStyleSheet("color: #27ae60; font-weight: bold;")
+        self.status_label.setStyleSheet(f"color: {theme.ACCENT_SUCCESS}; font-weight: 600;")
         layout.addWidget(self.status_label)
 
         self.table = QTableWidget()
@@ -52,21 +51,24 @@ class SensorConfigTab(QWidget):
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         for col in range(1, 6):
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.setFont(QFont("", 11))
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setDefaultSectionSize(32)
         self.table.cellChanged.connect(self._on_cell_changed)
         layout.addWidget(self.table)
 
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
 
-        add_btn = QPushButton("Add Sensor")
-        add_btn.setFont(QFont("", 11))
-        add_btn.setMinimumHeight(36)
+        add_btn = QPushButton("+ Add Sensor")
+        add_btn.setMinimumHeight(38)
+        add_btn.setProperty("variant", "primary")
+        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         add_btn.clicked.connect(self._add_sensor)
         btn_row.addWidget(add_btn)
 
         remove_btn = QPushButton("Remove Selected")
-        remove_btn.setFont(QFont("", 11))
-        remove_btn.setMinimumHeight(36)
+        remove_btn.setMinimumHeight(38)
+        remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         remove_btn.clicked.connect(self._remove_sensor)
         btn_row.addWidget(remove_btn)
 

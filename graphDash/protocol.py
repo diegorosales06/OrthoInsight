@@ -96,17 +96,17 @@ class DummySensor:
     def read_all(self):
         t = time.time() - self.start_time
         values = []
-        # for axis in range(N_AXES):
-        #     base = np.sin(2 * np.pi * self.frequency * t + self.phase + axis * 0.5)
-        #     noise = 0.02 * np.sin(2 * np.pi * (self.frequency * 3) * t + axis)
-        #     values.append(float(self.amplitude * (base + noise)))
+        for axis in range(N_AXES):
+            base = np.sin(2 * np.pi * self.frequency * t + self.phase + axis * 0.5)
+            noise = 0.02 * np.sin(2 * np.pi * (self.frequency * 3) * t + axis)
+            values.append(float(self.amplitude * (base + noise)))
 
-        values.append(-4.0) # Fx
-        values.append(0) # Fy
-        values.append(0) # Fz
-        values.append(0) # Mx
-        values.append(0) # My
-        values.append(0) # Mz
+        # values.append(-4.0) # Fx
+        # values.append(0) # Fy
+        # values.append(0) # Fz
+        # values.append(0) # Mx
+        # values.append(0) # My
+        # values.append(0) # Mz
         
         return values
 

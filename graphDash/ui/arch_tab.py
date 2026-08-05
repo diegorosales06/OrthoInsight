@@ -7,6 +7,11 @@ from PyQt6.QtGui import (
 )
 
 from graphDash.constants import REFRESH_MS
+from graphDash.ui import theme
+
+
+def _qcolor(hex_str):
+    return QColor(hex_str)
 
 # Mandibular arch in Universal numbering, ordered left-to-right on screen
 # (patient's right on viewer's left, standard occlusal-view convention).
@@ -96,6 +101,9 @@ class ArchTab(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
 
+        # Themed background
+        p.fillRect(0, 0, w, h, _qcolor(theme.SURFACE))
+
         # Reserve right side for the color bar legend
         bar_area_w = 100
         arch_w = w - bar_area_w
@@ -128,16 +136,16 @@ class ArchTab(QWidget):
         self._draw_legend(p, arch_w, 0, bar_area_w, h)
 
         # Title
-        title_font = QFont(); title_font.setPointSize(11); title_font.setBold(True)
+        title_font = QFont(); title_font.setPointSize(theme.FONT_SECTION); title_font.setBold(True)
         p.setFont(title_font)
-        p.setPen(QColor(40, 40, 40))
-        p.drawText(15, 22, "Lower Arch — Fz Heatmap (Occlusal view)")
+        p.setPen(_qcolor(theme.ON_SURFACE))
+        p.drawText(18, 26, "Lower Arch — Fz Heatmap")
 
-        # Legend for outline-only teeth
-        sub_font = QFont(); sub_font.setPointSize(9)
+        # Subtitle
+        sub_font = QFont(); sub_font.setPointSize(theme.FONT_BODY)
         p.setFont(sub_font)
-        p.setPen(QColor(90, 90, 90))
-        p.drawText(15, 38, "Outline only = no sensor mapped")
+        p.setPen(_qcolor(theme.ON_SURFACE_MUTED))
+        p.drawText(18, 44, "Occlusal view · outline only = no sensor mapped")
 
         p.end()
 
@@ -154,14 +162,14 @@ class ArchTab(QWidget):
         path = self._tooth_path(ttype, tw, th)
         if has_sensor:
             p.setBrush(QBrush(fill))
-            p.setPen(QPen(QColor(40, 40, 40), 1.5))
+            p.setPen(QPen(_qcolor(theme.ON_SURFACE), 1.5))
         else:
             p.setBrush(Qt.BrushStyle.NoBrush)
-            p.setPen(QPen(QColor(120, 120, 120), 1.2, Qt.PenStyle.DashLine))
+            p.setPen(QPen(_qcolor(theme.OUTLINE_STRONG), 1.2, Qt.PenStyle.DashLine))
         p.drawPath(path)
 
         # Simple cusp hints for molars / premolars
-        cusp_pen = QPen(QColor(80, 80, 80), 1.0)
+        cusp_pen = QPen(_qcolor(theme.ON_SURFACE_MUTED), 1.0)
         p.setPen(cusp_pen)
         p.setBrush(Qt.BrushStyle.NoBrush)
         if ttype == 'molar':
@@ -180,7 +188,7 @@ class ArchTab(QWidget):
         label_font.setPointSize(max(7, int(unit * 0.32)))
         label_font.setBold(True)
         p.setFont(label_font)
-        p.setPen(QColor(20, 20, 20))
+        p.setPen(_qcolor(theme.ON_SURFACE))
         text = str(tooth_num)
         fm = p.fontMetrics()
         p.drawText(
@@ -219,29 +227,30 @@ class ArchTab(QWidget):
         grad.setColorAt(0.7501, COLOR_GRAY)    # ≤ 0.5 N gray band
         grad.setColorAt(1.0,    COLOR_GRAY)    # bottom = 0.0 N
 
-        p.setPen(QPen(QColor(60, 60, 60), 1))
+        p.setPen(QPen(_qcolor(theme.OUTLINE_STRONG), 1))
         p.setBrush(QBrush(grad))
         p.drawRect(int(bar_x), int(bar_y), bar_w, int(bar_h))
 
-        font = QFont(); font.setPointSize(9)
+        font = QFont(); font.setPointSize(theme.FONT_CAPTION)
         p.setFont(font)
-        p.setPen(QColor(20, 20, 20))
+        p.setPen(_qcolor(theme.ON_SURFACE))
 
-        title_font = QFont(); title_font.setPointSize(10); title_font.setBold(True)
+        title_font = QFont(); title_font.setPointSize(theme.FONT_BODY); title_font.setBold(True)
         p.setFont(title_font)
-        p.drawText(int(x + 10), int(y + 22), "Fz (N)")
+        p.drawText(int(x + 10), int(y + 26), "Fz (N)")
         p.setFont(font)
 
         for value in [0.0, 0.5, 1.25, 2.0]:
             ry = self._bar_y_for_value(value, bar_y, bar_h)
+            p.setPen(_qcolor(theme.OUTLINE_STRONG))
             p.drawLine(int(bar_x + bar_w), int(ry), int(bar_x + bar_w + 6), int(ry))
+            p.setPen(_qcolor(theme.ON_SURFACE))
             p.drawText(int(bar_x + bar_w + 10), int(ry + 4), f"{value:.2f}")
 
-        # Mark the 0.5 N threshold with a small note
         thresh_y = self._bar_y_for_value(0.5, bar_y, bar_h)
-        note_font = QFont(); note_font.setPointSize(8); note_font.setItalic(True)
+        note_font = QFont(); note_font.setPointSize(theme.FONT_CAPTION); note_font.setItalic(True)
         p.setFont(note_font)
-        p.setPen(QColor(90, 90, 90))
+        p.setPen(_qcolor(theme.ON_SURFACE_MUTED))
         p.drawText(int(bar_x - 2), int(thresh_y + bar_h * 0.15), "≤ 0.5N: gray")
 
     @staticmethod

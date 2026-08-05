@@ -6,9 +6,10 @@ CMD_COEFF = (0x30, 0x32, 0x34, 0x36, 0x38, 0x3A)
 STT_STANDBY, STT_READY = 1, 3
 
 FORCE_AXES   = ("Fx", "Fy", "Fz")
-FORCE_COLORS = ("#e74c3c", "#2ecc71", "#3498db")  # red, green, blue
+# Colorblind-safe palette (matplotlib tab10), harmonizes with baby blue theme
+FORCE_COLORS = ("#1F77B4", "#2CA02C", "#D62728")  # blue, green, red
 MOMENT_AXES   = ("Mx", "My", "Mz")
-MOMENT_COLORS = ("#e67e22", "#9b59b6", "#1abc9c")  # orange, purple, teal
+MOMENT_COLORS = ("#FF7F0E", "#9467BD", "#17BECF")  # orange, purple, cyan
 ALL_AXES = FORCE_AXES + MOMENT_AXES
 N_AXES = 6
 

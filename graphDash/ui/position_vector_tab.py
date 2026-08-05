@@ -6,6 +6,7 @@ from PyQt6.QtGui import QFont
 from PyQt6.QtCore import Qt
 
 from graphDash.force_moment import TOOTH_TYPES, DEFAULTS
+from graphDash.ui import theme
 
 
 _DISPLAY_NAMES = {
@@ -21,29 +22,27 @@ class PositionVectorTab(QWidget):
         self.pos_vectors = pos_vectors
 
         layout = QVBoxLayout()
-        layout.setContentsMargins(20, 20, 20, 20)
-
-        header_font = QFont()
-        header_font.setPointSize(13)
-        header_font.setBold(True)
+        layout.setContentsMargins(24, 22, 24, 22)
+        layout.setSpacing(10)
 
         title = QLabel("Position Vector Configuration")
-        title.setFont(header_font)
+        title.setStyleSheet(
+            f"font-size: {theme.FONT_SECTION}pt; font-weight: 600; color: {theme.ON_SURFACE};")
         layout.addWidget(title)
 
         sub = QLabel("Edit the position vector [x, d+w, h] and sensor radius (d) per tooth type.")
-        sub.setStyleSheet("color: gray;")
+        sub.setStyleSheet(f"color: {theme.ON_SURFACE_MUTED}; font-size: {theme.FONT_BODY}pt;")
         layout.addWidget(sub)
-        layout.addSpacing(10)
+        layout.addSpacing(6)
 
         # Tooth type selector
         selector_row = QHBoxLayout()
         selector_label = QLabel("Tooth Type:")
-        selector_label.setFont(QFont("", 11))
+        selector_label.setStyleSheet(f"font-size: {theme.FONT_CONTROL}pt; color: {theme.ON_SURFACE};")
         selector_row.addWidget(selector_label)
 
         self.type_combo = QComboBox()
-        self.type_combo.setFont(QFont("", 11))
+        self.type_combo.setMinimumWidth(180)
         for tt in TOOTH_TYPES:
             self.type_combo.addItem(_DISPLAY_NAMES[tt], tt)
         self.type_combo.currentIndexChanged.connect(self._type_changed)
@@ -54,8 +53,9 @@ class PositionVectorTab(QWidget):
 
         # Parameter inputs
         params_group = QGroupBox("Parameters")
-        params_group.setFont(QFont("", 11))
         form = QFormLayout()
+        form.setSpacing(12)
+        form.setContentsMargins(6, 6, 6, 6)
 
         self.spin_x = self._make_spin(-100.0, 100.0, 0.0)
         form.addRow("x  (mm):", self.spin_x)
@@ -85,16 +85,16 @@ class PositionVectorTab(QWidget):
         ]:
             lbl = QLabel(line)
             lbl.setFont(desc_font)
-            lbl.setStyleSheet("color: gray;")
+            lbl.setStyleSheet(f"color: {theme.ON_SURFACE_MUTED};")
             layout.addWidget(lbl)
 
         layout.addSpacing(15)
 
         # Reset button
         self.reset_btn = QPushButton("Reset to Defaults")
-        self.reset_btn.setFont(QFont("", 11))
-        self.reset_btn.setMinimumHeight(36)
+        self.reset_btn.setMinimumHeight(38)
         self.reset_btn.setMaximumWidth(200)
+        self.reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.reset_btn.clicked.connect(self._reset)
         layout.addWidget(self.reset_btn)
 
@@ -105,12 +105,11 @@ class PositionVectorTab(QWidget):
 
     def _make_spin(self, lo, hi, default):
         spin = QDoubleSpinBox()
-        spin.setFont(QFont("", 11))
         spin.setRange(lo, hi)
         spin.setDecimals(2)
         spin.setSingleStep(0.1)
         spin.setValue(default)
-        spin.setMinimumWidth(120)
+        spin.setMinimumWidth(140)
         spin.valueChanged.connect(self._value_changed)
         return spin
 

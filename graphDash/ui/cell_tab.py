@@ -1,13 +1,53 @@
 import numpy as np
 
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
-from PyQt6.QtGui import QFont
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
+)
+from PyQt6.QtCore import Qt
 import pyqtgraph as pg
 
 from graphDash.constants import (
     FORCE_AXES, FORCE_COLORS, MOMENT_AXES, MOMENT_COLORS,
     DEFAULT_WINDOW_S, N_AXES,
 )
+from graphDash.ui import theme
+
+
+def _style_plot(pw, y_label):
+    """Apply theme styling to a pyqtgraph PlotWidget."""
+    pw.setBackground(theme.PLOT_BG)
+    pw.showGrid(x=True, y=True, alpha=theme.PLOT_GRID_ALPHA)
+    for axis_name in ("left", "bottom"):
+        axis = pw.getAxis(axis_name)
+        axis.setPen(pg.mkPen(color=theme.PLOT_AXIS_COLOR, width=1))
+        axis.setTextPen(pg.mkPen(color=theme.ON_SURFACE_MUTED))
+    pw.setLabel("left", y_label, color=theme.ON_SURFACE, size=f"{theme.FONT_BODY}pt")
+    pw.setLabel("bottom", "Time (s)", color=theme.ON_SURFACE, size=f"{theme.FONT_BODY}pt")
+    legend = pw.addLegend(offset=(-10, 10), labelTextColor=theme.ON_SURFACE)
+    legend.setBrush(pg.mkBrush(255, 255, 255, 220))
+    legend.setPen(pg.mkPen(theme.OUTLINE))
+    return legend
+
+
+def _readout_card(axis_name, color, unit):
+    """A rounded pill showing 'Axis: value unit', color-coded by axis."""
+    lbl = QLabel(f"{axis_name}: +0.000 {unit}")
+    lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    lbl.setStyleSheet(
+        f"QLabel {{"
+        f"  background-color: {theme.SURFACE_ALT};"
+        f"  color: {color};"
+        f"  border: 1px solid {theme.OUTLINE};"
+        f"  border-left: 3px solid {color};"
+        f"  border-radius: 6px;"
+        f"  padding: 6px 12px;"
+        f"  font-size: {theme.FONT_READOUT}pt;"
+        f"  font-weight: 600;"
+        f"  font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;"
+        f"}}"
+    )
+    lbl.setMinimumWidth(150)
+    return lbl
 
 
 class CellTab(QWidget):
@@ -17,80 +57,76 @@ class CellTab(QWidget):
         self.store = store
         self.offset = [0.0] * N_AXES
         self.window_s = DEFAULT_WINDOW_S
-        self.ma_n = 1  # 1 = no smoothing
+        self.ma_n = 1
 
         layout = QVBoxLayout()
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
 
         # --- Force plot ---
         self.force_plot = pg.PlotWidget()
-        self.force_plot.setBackground("w")
-        self.force_plot.setLabel("left", "Force (N)")
-        self.force_plot.setLabel("bottom", "Time (s)")
-        self.force_plot.addLegend()
-        self.force_plot.showGrid(x=True, y=True, alpha=0.3)
-
+        _style_plot(self.force_plot, "Force (N)")
         self.force_curves = []
         for i, axis in enumerate(FORCE_AXES):
-            pen = pg.mkPen(color=FORCE_COLORS[i], width=2)
+            pen = pg.mkPen(color=FORCE_COLORS[i], width=theme.PLOT_LINE_WIDTH)
             curve = self.force_plot.plot([], [], pen=pen, name=axis)
             self.force_curves.append(curve)
-        layout.addWidget(self.force_plot, 1)
+        layout.addWidget(self._plot_frame(self.force_plot), 1)
 
         # Force readouts
-        val_font = QFont(); val_font.setPointSize(12); val_font.setBold(True)
         force_val_row = QHBoxLayout()
+        force_val_row.setSpacing(8)
         self.force_labels = []
         for i, axis in enumerate(FORCE_AXES):
-            lbl = QLabel(f"{axis}: +0.000 N")
-            lbl.setFont(val_font)
-            lbl.setStyleSheet(f"color: {FORCE_COLORS[i]};")
+            lbl = _readout_card(axis, FORCE_COLORS[i], "N")
             force_val_row.addWidget(lbl)
             self.force_labels.append(lbl)
+        force_val_row.addStretch()
         layout.addLayout(force_val_row)
 
         # --- Moment plot ---
         self.moment_plot = pg.PlotWidget()
-        self.moment_plot.setBackground("w")
-        self.moment_plot.setLabel("left", "Moment (N·mm)")
-        self.moment_plot.setLabel("bottom", "Time (s)")
-        self.moment_plot.addLegend()
-        self.moment_plot.showGrid(x=True, y=True, alpha=0.3)
-
+        _style_plot(self.moment_plot, "Moment (N·mm)")
         self.moment_curves = []
         for i, axis in enumerate(MOMENT_AXES):
-            pen = pg.mkPen(color=MOMENT_COLORS[i], width=2)
+            pen = pg.mkPen(color=MOMENT_COLORS[i], width=theme.PLOT_LINE_WIDTH)
             curve = self.moment_plot.plot([], [], pen=pen, name=axis)
             self.moment_curves.append(curve)
-        layout.addWidget(self.moment_plot, 1)
+        layout.addWidget(self._plot_frame(self.moment_plot), 1)
 
         # Moment readouts
         moment_val_row = QHBoxLayout()
+        moment_val_row.setSpacing(8)
         self.moment_labels = []
         for i, axis in enumerate(MOMENT_AXES):
-            lbl = QLabel(f"{axis}: +0.000 N·mm")
-            lbl.setFont(val_font)
-            lbl.setStyleSheet(f"color: {MOMENT_COLORS[i]};")
+            lbl = _readout_card(axis, MOMENT_COLORS[i], "N·mm")
             moment_val_row.addWidget(lbl)
             self.moment_labels.append(lbl)
+        moment_val_row.addStretch()
         layout.addLayout(moment_val_row)
 
         # --- Tare controls ---
-        btnf = QFont(); btnf.setPointSize(11)
         tare_row = QHBoxLayout()
+        tare_row.setSpacing(10)
 
         tare_btn = QPushButton("Tare")
-        tare_btn.setFont(btnf)
         tare_btn.setMinimumHeight(36)
+        tare_btn.setMinimumWidth(100)
+        tare_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         tare_btn.clicked.connect(self.tare)
 
         clear_btn = QPushButton("Clear Tare")
-        clear_btn.setFont(btnf)
         clear_btn.setMinimumHeight(36)
+        clear_btn.setMinimumWidth(120)
+        clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         clear_btn.clicked.connect(self.clear_tare)
 
         self.offset_label = QLabel("offset: F[0.000, 0.000, 0.000]  M[0.000, 0.000, 0.000]")
-        self.offset_label.setStyleSheet("color: gray;")
+        self.offset_label.setStyleSheet(
+            f"color: {theme.ON_SURFACE_MUTED}; "
+            f"font-family: 'SF Mono', 'Menlo', 'Consolas', monospace; "
+            f"font-size: {theme.FONT_BODY}pt;"
+        )
 
         tare_row.addWidget(tare_btn)
         tare_row.addWidget(clear_btn)
@@ -98,6 +134,22 @@ class CellTab(QWidget):
         layout.addLayout(tare_row)
 
         self.setLayout(layout)
+
+    def _plot_frame(self, plot_widget):
+        """Wrap a plot in a rounded card border matching theme."""
+        frame = QFrame()
+        frame.setStyleSheet(
+            f"QFrame {{"
+            f"  background-color: {theme.SURFACE};"
+            f"  border: 1px solid {theme.OUTLINE};"
+            f"  border-radius: 8px;"
+            f"}}"
+        )
+        inner = QVBoxLayout()
+        inner.setContentsMargins(6, 6, 6, 6)
+        inner.addWidget(plot_widget)
+        frame.setLayout(inner)
+        return frame
 
     def tare(self):
         t, arrs = self.store.get_cell(self.cell_idx)
@@ -129,7 +181,6 @@ class CellTab(QWidget):
 
     def refresh(self):
         t, arrs = self.store.get_cell(self.cell_idx, self.window_s)
-        # Force axes (0, 1, 2)
         for i in range(3):
             adjusted = arrs[i] - self.offset[i] if len(arrs[i]) > 0 else arrs[i]
             smoothed = self._moving_avg(adjusted, self.ma_n)
@@ -137,7 +188,6 @@ class CellTab(QWidget):
             if len(smoothed) > 0:
                 self.force_labels[i].setText(
                     f"{FORCE_AXES[i]}: {smoothed[-1]:+7.3f} N")
-        # Moment axes (3, 4, 5)
         for i in range(3):
             adjusted = arrs[i+3] - self.offset[i+3] if len(arrs[i+3]) > 0 else arrs[i+3]
             smoothed = self._moving_avg(adjusted, self.ma_n)
