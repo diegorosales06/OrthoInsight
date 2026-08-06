@@ -1,11 +1,11 @@
 sensors:
-- name: Cell 1
+- name: incisor
   bus: 0
   dev: 0
   csb_gpio: 5
   tooth: 25
   tooth_type: central_incisor
-- name: Cell 2
+- name: molar
   bus: 0
   dev: 0
   csb_gpio: 26

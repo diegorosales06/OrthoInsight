@@ -156,7 +156,8 @@ class Dashboard(QMainWindow):
         self.cell_tabs = []
         for i in range(n_cells):
             tab = CellTab(i, store)
-            self.tabs.addTab(tab, f"Cell {i+1}")
+            name = self.sensor_configs[i].get("name", f"Cell {i+1}") if i < len(self.sensor_configs) else f"Cell {i+1}"
+            self.tabs.addTab(tab, name)
             self.cell_tabs.append(tab)
         self.arch_tab = ArchTab(store, tooth_per_cell=self.tooth_per_cell)
         self.tabs.addTab(self.arch_tab, "Arch View")
