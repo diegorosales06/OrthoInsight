@@ -1,12 +1,13 @@
 from PyQt6.QtWidgets import (
-    QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QSpinBox, QComboBox, QFrame,
+    QMainWindow, QTabWidget, QTabBar, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPushButton, QSpinBox, QComboBox, QFrame, QMenu,
 )
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QTimer, Qt, pyqtSignal
+from PyQt6.QtGui import QAction, QActionGroup
 
 from graphDash.constants import DEFAULT_RATE_HZ, REFRESH_MS
 from graphDash.ui import theme
-from graphDash.ui.cell_tab import CellTab
+from graphDash.ui.cells_tab import CellsTab
 from graphDash.ui.sessions_tab import SessionsTab
 from graphDash.ui.arch_tab import ArchTab
 from graphDash.ui.position_vector_tab import PositionVectorTab
@@ -27,6 +28,49 @@ def _labeled_control(label_text, widget):
     wrap = QWidget()
     wrap.setLayout(box)
     return wrap
+
+
+class _CellTabBar(QTabBar):
+    """Tab bar where one designated tab doubles as a dropdown: clicking it
+    switches to that tab *and* pops up a menu of the available load cells."""
+
+    cell_picked = pyqtSignal(int)
+
+    def __init__(self):
+        super().__init__()
+        self.menu_index = -1
+        self._items = []
+        self._current_item = 0
+
+    def set_menu_tab(self, tab_index, items, current=0):
+        self.menu_index = tab_index
+        self._items = list(items)
+        self._current_item = current
+
+    def mousePressEvent(self, event):
+        idx = self.tabAt(event.position().toPoint())
+        if idx == self.menu_index and event.button() == Qt.MouseButton.LeftButton:
+            self.setCurrentIndex(idx)
+            self._popup(idx)
+            return
+        super().mousePressEvent(event)
+
+    def _popup(self, tab_index):
+        if not self._items:
+            return
+        menu = QMenu(self)
+        group = QActionGroup(menu)
+        group.setExclusive(True)
+        for i, name in enumerate(self._items):
+            act = QAction(name, menu)
+            act.setCheckable(True)
+            act.setChecked(i == self._current_item)
+            act.triggered.connect(lambda _checked, n=i: self.cell_picked.emit(n))
+            group.addAction(act)
+            menu.addAction(act)
+        rect = self.tabRect(tab_index)
+        menu.setMinimumWidth(rect.width())
+        menu.exec(self.mapToGlobal(rect.bottomLeft()))
 
 
 class Dashboard(QMainWindow):
@@ -153,12 +197,18 @@ class Dashboard(QMainWindow):
         # ---- Tabs ----
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
-        self.cell_tabs = []
-        for i in range(n_cells):
-            tab = CellTab(i, store)
-            name = self.sensor_configs[i].get("name", f"Cell {i+1}") if i < len(self.sensor_configs) else f"Cell {i+1}"
-            self.tabs.addTab(tab, name)
-            self.cell_tabs.append(tab)
+        self.cell_tab_bar = _CellTabBar()
+        self.tabs.setTabBar(self.cell_tab_bar)
+        names = [
+            self.sensor_configs[i].get("name", f"Cell {i+1}") if i < len(self.sensor_configs) else f"Cell {i+1}"
+            for i in range(n_cells)
+        ]
+        self.cells_tab = CellsTab(n_cells, store, names)
+        self.cell_tabs = self.cells_tab.cell_tabs
+        self.cells_index = self.tabs.addTab(self.cells_tab, "Cell Graphs")
+        self.cell_tab_bar.cell_picked.connect(self.cells_tab.select)
+        self.cells_tab.selection_changed.connect(self._cell_selection_changed)
+        self._cell_selection_changed(0)
         self.arch_tab = ArchTab(store, tooth_per_cell=self.tooth_per_cell)
         self.tabs.addTab(self.arch_tab, "Arch View")
         if self.pos_vectors:
@@ -176,6 +226,11 @@ class Dashboard(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._refresh)
         self.timer.start(REFRESH_MS)
+
+    def _cell_selection_changed(self, idx):
+        """Keep the tab label and its dropdown in sync with the visible cell."""
+        self.cell_tab_bar.set_menu_tab(self.cells_index, self.cells_tab.names, idx)
+        self.tabs.setTabText(self.cells_index, f"Cell Graphs · {self.cells_tab.current_name()}  ▾")
 
     def _set_status(self, state):
         if state == "recording":
@@ -259,7 +314,6 @@ class Dashboard(QMainWindow):
             self.start_btn.setChecked(False)
             self._toggle_run()
 
-        n = min(len(sensors), self.n_cells)
         names = [s.get("name", f"Cell {i+1}") for i, s in enumerate(sensors)]
         tooth_types = [s.get("tooth_type") for s in sensors]
         teeth = [s.get("tooth") for s in sensors]
@@ -271,8 +325,7 @@ class Dashboard(QMainWindow):
         if hasattr(self.arch_tab, 'tooth_per_cell'):
             self.arch_tab.tooth_per_cell = teeth[:self.n_cells]
 
-        for i in range(n):
-            self.tabs.setTabText(i, names[i])
+        self.cells_tab.set_names(names)
 
         self.store.clear()
 
@@ -283,5 +336,4 @@ class Dashboard(QMainWindow):
                 f"color: {theme.ACCENT_WARNING}; font-weight: 600;")
 
     def _refresh(self):
-        for t in self.cell_tabs:
-            t.refresh()
+        self.cells_tab.refresh()

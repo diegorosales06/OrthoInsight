@@ -122,6 +122,39 @@ def stylesheet() -> str:
         color: {ON_SURFACE};
     }}
 
+    /* ---- dropdown menu (cell selector on the Cell Graphs tab) ---- */
+    QMenu {{
+        background-color: {SURFACE};
+        border: 1px solid {OUTLINE_STRONG};
+        border-radius: 8px;
+        padding: 4px;
+    }}
+    QMenu::item {{
+        background: transparent;
+        color: {ON_SURFACE};
+        padding: 7px 26px 7px 22px;
+        border-radius: 5px;
+        font-size: {FONT_CONTROL}pt;
+    }}
+    QMenu::item:selected {{
+        background-color: {PRIMARY_LIGHT};
+        color: {PRIMARY_PRESSED};
+    }}
+    QMenu::item:checked {{
+        font-weight: 600;
+        color: {PRIMARY_PRESSED};
+    }}
+    QMenu::indicator {{
+        width: 12px;
+        height: 12px;
+        left: 6px;
+    }}
+    QMenu::separator {{
+        height: 1px;
+        background: {OUTLINE};
+        margin: 4px 8px;
+    }}
+
     /* ---- default buttons (secondary/ghost) ---- */
     QPushButton {{
         background-color: {SURFACE};

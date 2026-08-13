@@ -30,7 +30,7 @@ class PositionVectorTab(QWidget):
             f"font-size: {theme.FONT_SECTION}pt; font-weight: 600; color: {theme.ON_SURFACE};")
         layout.addWidget(title)
 
-        sub = QLabel("Edit the position vector [x, d+w, h] and sensor radius (d) per tooth type.")
+        sub = QLabel("Edit the position vector r = [rx, ry, rz] and constant w per tooth type.")
         sub.setStyleSheet(f"color: {theme.ON_SURFACE_MUTED}; font-size: {theme.FONT_BODY}pt;")
         layout.addWidget(sub)
         layout.addSpacing(6)
@@ -57,17 +57,17 @@ class PositionVectorTab(QWidget):
         form.setSpacing(12)
         form.setContentsMargins(6, 6, 6, 6)
 
-        self.spin_x = self._make_spin(-100.0, 100.0, 0.0)
-        form.addRow("x  (mm):", self.spin_x)
+        self.spin_rx = self._make_spin(-100.0, 100.0, 0.0)
+        form.addRow("rx  (mm):", self.spin_rx)
 
-        self.spin_dw = self._make_spin(0.01, 200.0, 9.5)
-        form.addRow("d + w  (mm):", self.spin_dw)
+        self.spin_ry = self._make_spin(-200.0, 200.0, 9.5)
+        form.addRow("ry  (mm):", self.spin_ry)
 
-        self.spin_h = self._make_spin(0.01, 200.0, 17.15)
-        form.addRow("h  (mm):", self.spin_h)
+        self.spin_rz = self._make_spin(-200.0, 200.0, 17.15)
+        form.addRow("rz  (mm):", self.spin_rz)
 
-        self.spin_d = self._make_spin(0.01, 200.0, 4.8)
-        form.addRow("d  (mm):", self.spin_d)
+        self.spin_w = self._make_spin(0.01, 200.0, 4.7)
+        form.addRow("w  (mm):", self.spin_w)
 
         params_group.setLayout(form)
         layout.addWidget(params_group)
@@ -78,10 +78,10 @@ class PositionVectorTab(QWidget):
         desc_font.setItalic(True)
 
         for line in [
-            "x = lateral offset (default 0)",
-            "d + w = sensor radius + sensor-end to shaft center",
-            "h = height of tooth from top of sensor",
-            "d = radius of force sensor",
+            "rx = lateral offset (default 0)",
+            "ry = position vector y component",
+            "rz = position vector z component (tooth height)",
+            "w  = user-defined constant",
         ]:
             lbl = QLabel(line)
             lbl.setFont(desc_font)
@@ -121,28 +121,24 @@ class PositionVectorTab(QWidget):
 
     def _load_values(self):
         pv = self.pos_vectors.get(self._current_type())
-        self.spin_x.blockSignals(True)
-        self.spin_dw.blockSignals(True)
-        self.spin_h.blockSignals(True)
-        self.spin_d.blockSignals(True)
+        for spin in (self.spin_rx, self.spin_ry, self.spin_rz, self.spin_w):
+            spin.blockSignals(True)
 
-        self.spin_x.setValue(pv["x"])
-        self.spin_dw.setValue(pv["d_plus_w"])
-        self.spin_h.setValue(pv["h"])
-        self.spin_d.setValue(pv["d"])
+        self.spin_rx.setValue(pv["rx"])
+        self.spin_ry.setValue(pv["ry"])
+        self.spin_rz.setValue(pv["rz"])
+        self.spin_w.setValue(pv["w"])
 
-        self.spin_x.blockSignals(False)
-        self.spin_dw.blockSignals(False)
-        self.spin_h.blockSignals(False)
-        self.spin_d.blockSignals(False)
+        for spin in (self.spin_rx, self.spin_ry, self.spin_rz, self.spin_w):
+            spin.blockSignals(False)
 
     def _value_changed(self):
         self.pos_vectors.set(
             self._current_type(),
-            x=self.spin_x.value(),
-            d_plus_w=self.spin_dw.value(),
-            h=self.spin_h.value(),
-            d=self.spin_d.value(),
+            rx=self.spin_rx.value(),
+            ry=self.spin_ry.value(),
+            rz=self.spin_rz.value(),
+            w=self.spin_w.value(),
         )
 
     def _reset(self):

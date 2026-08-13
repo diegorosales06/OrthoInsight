@@ -11,7 +11,7 @@ sensors:
   csb_gpio: 26
   tooth: 30
   tooth_type: molar
-- name: Cell 3
+- name: molar
   bus: 0
   dev: 0
   csb_gpio: 0
