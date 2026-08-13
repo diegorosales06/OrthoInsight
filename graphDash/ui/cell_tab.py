@@ -51,11 +51,12 @@ def _readout_card(axis_name, color, unit):
 
 
 class CellTab(QWidget):
-    def __init__(self, cell_idx, store):
+    def __init__(self, cell_idx, store, sampler=None, tare_offsets=None):
         super().__init__()
         self.cell_idx = cell_idx
         self.store = store
-        self.offset = [0.0] * N_AXES
+        self.sampler = sampler
+        self.tare_offsets = tare_offsets
         self.window_s = DEFAULT_WINDOW_S
         self.ma_n = 1
 
@@ -152,17 +153,25 @@ class CellTab(QWidget):
         return frame
 
     def tare(self):
-        t, arrs = self.store.get_cell(self.cell_idx)
-        if len(t) > 0:
-            self.offset = [float(a[-1]) for a in arrs]
-            self._update_offset_label()
-
-    def clear_tare(self):
-        self.offset = [0.0] * N_AXES
+        if self.sampler is None or self.tare_offsets is None:
+            return
+        raw = self.sampler.get_last_raw(self.cell_idx)
+        self.tare_offsets.set(self.cell_idx, raw)
         self._update_offset_label()
 
+    def clear_tare(self):
+        if self.tare_offsets is None:
+            return
+        self.tare_offsets.clear(self.cell_idx)
+        self._update_offset_label()
+
+    def _current_offset(self):
+        if self.tare_offsets is None:
+            return [0.0] * N_AXES
+        return self.tare_offsets.get(self.cell_idx)
+
     def _update_offset_label(self):
-        o = self.offset
+        o = self._current_offset()
         self.offset_label.setText(
             f"offset: F[{o[0]:+.3f}, {o[1]:+.3f}, {o[2]:+.3f}]  "
             f"M[{o[3]:+.3f}, {o[4]:+.3f}, {o[5]:+.3f}]")
@@ -182,15 +191,13 @@ class CellTab(QWidget):
     def refresh(self):
         t, arrs = self.store.get_cell(self.cell_idx, self.window_s)
         for i in range(3):
-            adjusted = arrs[i] - self.offset[i] if len(arrs[i]) > 0 else arrs[i]
-            smoothed = self._moving_avg(adjusted, self.ma_n)
+            smoothed = self._moving_avg(arrs[i], self.ma_n)
             self.force_curves[i].setData(t, smoothed)
             if len(smoothed) > 0:
                 self.force_labels[i].setText(
                     f"{FORCE_AXES[i]}: {smoothed[-1]:+7.3f} N")
         for i in range(3):
-            adjusted = arrs[i+3] - self.offset[i+3] if len(arrs[i+3]) > 0 else arrs[i+3]
-            smoothed = self._moving_avg(adjusted, self.ma_n)
+            smoothed = self._moving_avg(arrs[i+3], self.ma_n)
             self.moment_curves[i].setData(t, smoothed)
             if len(smoothed) > 0:
                 self.moment_labels[i].setText(

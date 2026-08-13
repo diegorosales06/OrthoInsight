@@ -75,13 +75,14 @@ class _CellTabBar(QTabBar):
 
 class Dashboard(QMainWindow):
     def __init__(self, sampler, store, n_cells, csv_logger=None, tooth_per_cell=None, pos_vectors=None,
-                 config_path=None, sensor_configs=None):
+                 config_path=None, sensor_configs=None, tare_offsets=None):
         super().__init__()
         self.sampler = sampler
         self.store = store
         self.csv_logger = csv_logger
         self.tooth_per_cell = tooth_per_cell or []
         self.pos_vectors = pos_vectors
+        self.tare_offsets = tare_offsets
         self.config_path = config_path
         self.sensor_configs = sensor_configs or []
         self.n_cells = n_cells
@@ -203,7 +204,8 @@ class Dashboard(QMainWindow):
             self.sensor_configs[i].get("name", f"Cell {i+1}") if i < len(self.sensor_configs) else f"Cell {i+1}"
             for i in range(n_cells)
         ]
-        self.cells_tab = CellsTab(n_cells, store, names)
+        self.cells_tab = CellsTab(n_cells, store, names,
+                                  sampler=sampler, tare_offsets=tare_offsets)
         self.cell_tabs = self.cells_tab.cell_tabs
         self.cells_index = self.tabs.addTab(self.cells_tab, "Cell Graphs")
         self.cell_tab_bar.cell_picked.connect(self.cells_tab.select)

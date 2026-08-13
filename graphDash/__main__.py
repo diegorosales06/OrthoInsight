@@ -10,7 +10,7 @@ from graphDash.protocol import Sensor
 from graphDash.config import load_sensor_config, build_simulation_cells
 from graphDash.datastore import DataStore
 from graphDash.csv_logger import CSVLogger
-from graphDash.force_moment import PositionVectors
+from graphDash.force_moment import PositionVectors, TareOffsets
 from graphDash.sampler import Sampler
 from graphDash.ui.dashboard import Dashboard
 
@@ -81,10 +81,12 @@ def main(argv=None):
     csv_logger.start()
 
     pos_vectors = PositionVectors()
+    tare_offsets = TareOffsets(n_cells)
 
     sampler = Sampler(cells, store, simulation_cells=simulation_cells, simulate=args.debug,
                       csv_logger=csv_logger, cell_names=names,
-                      pos_vectors=pos_vectors, cell_tooth_types=tooth_types)
+                      pos_vectors=pos_vectors, cell_tooth_types=tooth_types,
+                      tare_offsets=tare_offsets)
     sampler.start()
 
     # Ensure teeth/tooth_types lists match n_cells
@@ -104,7 +106,8 @@ def main(argv=None):
     theme.apply(app)
     win = Dashboard(sampler, store, n_cells, csv_logger=csv_logger,
                     tooth_per_cell=teeth, pos_vectors=pos_vectors,
-                    config_path=args.config, sensor_configs=sensor_configs)
+                    config_path=args.config, sensor_configs=sensor_configs,
+                    tare_offsets=tare_offsets)
     win.show()
 
     exit_code = app.exec()

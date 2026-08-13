@@ -11,7 +11,7 @@ class CellsTab(QWidget):
 
     selection_changed = pyqtSignal(int)
 
-    def __init__(self, n_cells, store, names=None):
+    def __init__(self, n_cells, store, names=None, sampler=None, tare_offsets=None):
         super().__init__()
         self.store = store
         self.cell_tabs = []
@@ -26,7 +26,7 @@ class CellsTab(QWidget):
 
         self.stack = QStackedWidget()
         for i in range(n_cells):
-            tab = CellTab(i, store)
+            tab = CellTab(i, store, sampler=sampler, tare_offsets=tare_offsets)
             self.stack.addWidget(tab)
             self.cell_tabs.append(tab)
         layout.addWidget(self.stack, 1)

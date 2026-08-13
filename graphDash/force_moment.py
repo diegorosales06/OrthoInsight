@@ -34,6 +34,31 @@ class PositionVectors:
             self._vectors[tooth_type] = dict(DEFAULTS[tooth_type])
 
 
+class TareOffsets:
+    """Thread-safe per-cell 6-axis offset subtracted from raw readings
+    before compensation runs."""
+
+    def __init__(self, n_cells):
+        self._lock = threading.Lock()
+        self._offsets = [[0.0] * 6 for _ in range(n_cells)]
+
+    def get(self, cell_idx):
+        with self._lock:
+            if 0 <= cell_idx < len(self._offsets):
+                return list(self._offsets[cell_idx])
+            return [0.0] * 6
+
+    def set(self, cell_idx, offset):
+        with self._lock:
+            if 0 <= cell_idx < len(self._offsets):
+                self._offsets[cell_idx] = [float(v) for v in offset][:6]
+
+    def clear(self, cell_idx):
+        with self._lock:
+            if 0 <= cell_idx < len(self._offsets):
+                self._offsets[cell_idx] = [0.0] * 6
+
+
 def compute_adjusted(raw, tooth_type, pos_vectors):
     """Apply force/moment compensation based on threshold conditions.
 

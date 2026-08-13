@@ -10,7 +10,8 @@ class Sampler(threading.Thread):
 
     def __init__(self, cells, store, simulation_cells=None, simulate=False,
                  csv_logger=None, cell_names=None,
-                 pos_vectors=None, cell_tooth_types=None):
+                 pos_vectors=None, cell_tooth_types=None,
+                 tare_offsets=None):
         super().__init__()
         self.cells = cells
         self.simulation_cells = simulation_cells or []
@@ -20,9 +21,18 @@ class Sampler(threading.Thread):
         self.cell_names = cell_names or [f"Cell {i+1}" for i in range(len(cells) or len(simulation_cells))]
         self.pos_vectors = pos_vectors
         self.cell_tooth_types = cell_tooth_types or []
+        self.tare_offsets = tare_offsets
         self.rate_hz = DEFAULT_RATE_HZ
         self.running = False
         self._stop = False
+        self._last_raw_lock = threading.Lock()
+        self._last_raw = {}
+
+    def get_last_raw(self, cell_idx):
+        """Most recent raw sensor reading for a cell, pre-tare, pre-compensation."""
+        with self._last_raw_lock:
+            r = self._last_raw.get(cell_idx)
+            return list(r) if r is not None else [0.0] * N_AXES
 
     def run(self):
         while not self._stop:
@@ -43,16 +53,25 @@ class Sampler(threading.Thread):
                 except Exception:
                     raw_readings.append([0.0] * N_AXES)
 
+            with self._last_raw_lock:
+                for ci, r in enumerate(raw_readings):
+                    self._last_raw[ci] = list(r)
+
             readings = []
             for ci, raw in enumerate(raw_readings):
+                if self.tare_offsets is not None:
+                    off = self.tare_offsets.get(ci)
+                    tared = [raw[k] - off[k] for k in range(N_AXES)]
+                else:
+                    tared = raw
                 tt = self.cell_tooth_types[ci] if ci < len(self.cell_tooth_types) else None
                 if tt and self.pos_vectors:
                     try:
-                        readings.append(compute_adjusted(raw, tt, self.pos_vectors))
+                        readings.append(compute_adjusted(tared, tt, self.pos_vectors))
                     except Exception:
-                        readings.append(raw)
+                        readings.append(tared)
                 else:
-                    readings.append(raw)
+                    readings.append(tared)
             self.store.append(t0, readings)
 
             if self.csv_logger:
