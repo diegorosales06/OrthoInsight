@@ -103,12 +103,12 @@ class DummySensor:
 
 
         vals = {
-            "Fx": -0.114,
+            "Fx": 0.114,
             "Fy": -0.044,
             "Fz": -3.846,
             "Mx": -0.04416,
-            "My": 0,
-            "Mz": 0.04
+            "My": -0.00292,
+            "Mz": -0.00018
         }
         values.append(vals["Fx"]) # Fx
         values.append(vals["Fy"]) # Fy
