@@ -86,7 +86,11 @@ def compute_adjusted(raw, tooth_type, pos_vectors):
     rx = pv["rx"]/1000
     ry = pv["ry"]/1000
     rz = pv["rz"]/1000
-    w = pv["w"]/1000
+    w = pv["w"]/1000 # in m
+    # rx = pv["rx"]
+    # ry = pv["ry"]
+    # rz = pv["rz"]
+    # w = pv["w"] # in mm
 
     fxo, fyo, fzo = raw[0], raw[1], raw[2]
     mxo, myo, mzo = raw[3], raw[4], raw[5]
@@ -97,27 +101,34 @@ def compute_adjusted(raw, tooth_type, pos_vectors):
     fz = fzo
 
     # print(rx, ry, rz, w)
+    ry = 0.0082
+    # rz = 0.014795
+    w = 0.002298
 
+    # print(f"{fxo=}, {mxo=}, {rz=}, {ry=}")
     # case 2
     if abs(fyo) >= FORCE_THRESHOLD and abs(fzo) >= FORCE_THRESHOLD:
         fz = (mxo + fy*rz) / -ry
         mxo = -fz*ry - mxo
+        # print("case 1")
+        print(f"{fz=}")
+        print(f"{mxo=}")
     elif abs(fyo) >= FORCE_THRESHOLD or abs(fzo) >= FORCE_THRESHOLD:
+        print("case 2")
         fz = (mxo + fy*rz) / -ry
         mxo = -fz*ry - mxo
+        print(f"{fzo=}")
+        print(f"{mxo=}")
 
     # --- Moment: raw sensor moments with per-component corrections ---
     mx = mxo
-    # mx = -fy*rz - fz*ry
     my = myo
     mz = mzo
 
     if abs(fxo) >= FORCE_THRESHOLD:                       # case 1
         mz = mzo + fxo * ry
 
-    if abs(fzo) >= FORCE_THRESHOLD:                       # case 3
-        mx = mxo - fzo * ry
-
-    print(f"{fx=}, {fy=}, {fz=}, {mx=}, {my=}, {mz=}")
+    # print(f"{fxo=}, {fyo=}, {fzo=}, {mxo=}, {myo=}, {mzo=}")
+    #print(f"{fx=}, {fy=}, {fz=}, {mx=}, {my=}, {mz=}")
     mx, my, mz = mx*1000, my*1000, mz*1000
     return [fx, fy, fz, mx, my, mz]
