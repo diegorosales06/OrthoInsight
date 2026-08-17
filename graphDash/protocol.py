@@ -69,13 +69,15 @@ class Sensor:
         time.sleep(0.01)
 
     def read_all(self):
-        """Returns [Fx, Fy, Fz, Mx, My, Mz]."""
+        """Returns [Fx, Fy, Fz, Mx, My, Mz] in [N, N, N, N*m, N*m, N*m]."""
         r = self._cmd([CMD_DATA2], 21)
         adc = [s24(r[3+k*3 : 6+k*3]) for k in range(6)]
         out = []
         for axis in range(6):
             acc = sum(c * a for c, a in zip(self.coeff[axis], adc))
-            out.append(int(acc / 2048) / 1000.0)
+            shifted = int(acc / 2048)
+            scale = 1000.0 if axis < 3 else 100000.0
+            out.append(shifted / scale)
         return out
 
     def stop(self):
