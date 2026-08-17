@@ -5,15 +5,3 @@ sensors:
   csb_gpio: 5
   tooth: 25
   tooth_type: central_incisor
-- name: molar
-  bus: 0
-  dev: 0
-  csb_gpio: 26
-  tooth: 30
-  tooth_type: molar
-- name: molar
-  bus: 0
-  dev: 0
-  csb_gpio: 0
-  tooth: 25
-  tooth_type: molar

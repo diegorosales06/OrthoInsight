@@ -101,8 +101,10 @@ def compute_adjusted(raw, tooth_type, pos_vectors):
     # case 2
     if abs(fyo) >= FORCE_THRESHOLD and abs(fzo) >= FORCE_THRESHOLD:
         fz = (mxo + fy*rz) / -ry
+        mxo = -fz*ry - mxo
     elif abs(fyo) >= FORCE_THRESHOLD or abs(fzo) >= FORCE_THRESHOLD:
         fz = (mxo + fy*rz) / -ry
+        mxo = -fz*ry - mxo
 
     # --- Moment: raw sensor moments with per-component corrections ---
     mx = mxo
