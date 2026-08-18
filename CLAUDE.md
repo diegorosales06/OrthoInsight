@@ -44,7 +44,7 @@ The `graphDash/` package is the main codebase, with `graphDash.py` at the repo r
 
 - `__main__.py` — entry point: arg parsing, config loading, DB init, thread wiring, pyqtgraph global config, `theme.apply(app)`, Qt event loop.
 - `constants.py` — MMS101 command bytes, axis names/colors (colorblind-safe `tab10` palette), UI defaults (`REFRESH_MS`, `MAX_BUFFER_SAMPLES`, etc.).
-- `protocol.py` — `s24()` 3-byte signed-int decoder, `Sensor` (real SPI hardware), `DummySensor` (sine+noise simulation).
+- `protocol.py` — `s24()` 3-byte signed-int decoder, `Sensor` (real SPI hardware), `DummySensor` (fixed-value simulation). `Sensor.read_all()` returns `[Fx, Fy, Fz, Mx, My, Mz]` in `[N, N, N, N·m, N·m, N·m]`. The matrix-multiply result is right-shifted by 11 bits (÷2048), then forces are divided by 1000 (`0.001 N` LSB → N) and moments by 100000 (`0.00001 N·m` LSB → N·m) per the MMS101 datasheet matrix-operation section. **This per-axis scaling only lives in `graphDash/protocol.py`** — `pi_sender.py`, `cell_dashboard.py`, `stream.py`, `stream_threaded.py`, and `stream.c` still divide all six axes by 1000 (they only read forces, so it doesn't matter there; if you ever add moment support to them, apply the 100000 divisor).
 - `datastore.py` — `DataStore`: thread-safe ring buffer (`collections.deque` + `threading.Lock`, `MAX_BUFFER_SAMPLES=5000`). `get_cell()` supports windowing to the last N seconds and returns time relative to the window's first sample.
 - `csv_logger.py` — `CSVLogger`: long-lived background `threading.Thread` with per-recording lifecycle (see "Recording lifecycle" below).
 - `sampler.py` — `Sampler`: background thread that polls all cells (real or simulated) at `rate_hz`, applies force/moment overrides via `force_moment.compute_adjusted()`, then pushes adjusted readings into `DataStore` and forwards them to `CSVLogger`. `running` gates whether it's actively sampling; `simulate` gates real vs. dummy sensors — both are toggled live from the UI.
@@ -120,33 +120,33 @@ The `tooth_type` field (optional) assigns a tooth category — `central_incisor`
 
 ### Force/moment overrides
 
-`force_moment.py` applies threshold-based overrides to raw sensor readings. Each cell's `tooth_type` (from `sensors.yaml`) determines which position vector `r = [x, d+w, h]` to use. An additional parameter `d` (sensor radius) is needed for one of the force corrections. The `PositionVectors` class stores per-tooth-type vectors with thread-safe access; the UI tab writes to it, the sampler reads from it.
+`force_moment.py` applies threshold-based overrides to raw sensor readings. Each cell's `tooth_type` (from `sensors.yaml`) determines which position vector `r = [rx, ry, rz]` plus scalar `w` to use. The `PositionVectors` class stores per-tooth-type vectors with thread-safe access; the UI tab writes to it, the sampler reads from it. Also defined here: `TareOffsets`, a per-cell 6-axis offset subtracted from raw readings before compensation runs.
 
-**Position vector defaults:**
+**Position vector defaults** (all values in mm; `compute_adjusted` divides each by 1000 to work in meters):
 
-| Tooth type | x | d+w | h | d |
+| Tooth type | rx | ry | rz | w |
 |---|---|---|---|---|
-| Central incisor | 0.0 | 9.5 | 17.15 | 4.8 |
-| Premolar | 0.0 | 9.5 | 14.9 | 4.8 |
-| Molar | 0.0 | 9.5 | 15.4 | 4.8 |
+| Central incisor | 0.0 | 8.2 | 17.93 | 2.298 |
+| Premolar | 0.0 | 9.5 | 14.9 | 4.7 |
+| Molar | 0.0 | 9.5 | 15.4 | 4.7 |
 
-**Moment** — always computed as `r × F` (cross product) using raw forces, never raw sensor Mx/My/Mz. Full cross product: `M = [y*Fz − z*Fy, z*Fx − x*Fz, x*Fy − y*Fx]` where `x=x, y=d+w, z=h`. Then:
-- Condition 1 (`|Fx| >= 0.3 N`): drop the `−y*Fx` term from Mz
-- Condition 2 (`|Fz| >= 0.3 N`): drop the `y*Fz` term from Mx
+**Units contract** — raw forces (`fxo, fyo, fzo`) arrive in **N** and raw moments (`mxo, myo, mzo`) in **N·m** from `protocol.py`. All arithmetic below stays in SI (N, m, N·m); the final `mx, my, mz *= 1000` at the end of `compute_adjusted` converts moments to **N·mm** for display. So the values that get stored in `DataStore`, logged to CSV, and plotted are **forces in N, moments in N·mm.**
 
-When both conditions met: `M = [−z*Fy, z*Fx − x*Fz, x*Fy]`. When neither: full cross product (no terms dropped).
+**Force** — Fx and Fy always pass through raw. Fz is replaced (not summed) when the threshold trips:
+- If `|fyo| >= 0.3 N` **or** `|fzo| >= 0.3 N`: `fz = (mxo + fy*rz) / -ry`
+- Otherwise: `fz = fzo`
 
-**Force** — adjustments to Fz only; Fx and Fy pass through unchanged. Both deltas use the original raw Fz (independent, additive):
-- Condition 3 (`|Fy| >= 0.3 N`): `Fz += −(h * Fy) / (d+w)`
-- Condition 4 (`|Fz| >= 0.3 N`): `Fz += (Fz * (d+w)) / d`
+**Moment** — My always passes through raw. Mx and Mz are independently corrected from the raw sensor moment (not recomputed as a full cross product):
+- `mz = mzo`; if `|fxo| >= 0.3 N`: `mz = mzo + fxo*ry`
+- `mx = mxo`; if `|fzo| >= 0.3 N`: `mx = mxo - fzo*ry`
 
-Moment computation always uses raw forces even when conditions 3/4 adjust the displayed force values. The adjusted values are what get stored in `DataStore` and logged to CSV.
+The moment corrections use raw (pre-override) forces, not the possibly-replaced `fz`.
 
 ### Dashboard tabs
 
-- **Cell Graphs** (one tab, one load cell shown at a time — click the tab header to pop a dropdown of cells): force/moment time-series plots (PyQtGraph), live readout labels, tare/clear-tare controls, causal moving-average smoother (`_moving_avg`, no lookahead). Plots show the adjusted (overridden) force/moment values when a cell has a `tooth_type` configured.
+- **Cell Graphs** (one tab, one load cell shown at a time — click the tab header to pop a dropdown of cells): force/moment time-series plots (PyQtGraph), live readout labels, tare/clear-tare controls, causal moving-average smoother (`_moving_avg`, no lookahead). Plots show the adjusted (overridden) force/moment values when a cell has a `tooth_type` configured. Force axis is in **N**, moment axis is in **N·mm** (see "Force/moment overrides" for the unit chain).
 - **Arch View** (`ArchTab`): lower dental arch (teeth 17–32) rendered via `QPainter` on a parabolic curve. Teeth are drawn with type-specific shapes (rounded rects for molars/premolars/incisors, pentagons for canines) and cusp hints (small circles). Mapped teeth are filled with a Fz-based heatmap color; unmapped teeth have dashed outlines and no fill. Color scale: gray ≤ 0.5 N, green→yellow at 0.5→1.25 N, yellow→red at 1.25→2.0 N, capped red above. Includes a gradient color bar legend. Refreshes every `REFRESH_MS` (50 ms).
-- **Position Vector** (`PositionVectorTab`): per-tooth-type position vector editor. Dropdown selects tooth type (central incisor, premolar, molar); editable fields for x, d+w, h, and d. Changing the tooth type loads that type's current values. Edits take effect immediately on the next sample cycle. A "Reset to Defaults" button restores the selected type's factory values.
+- **Position Vector** (`PositionVectorTab`): per-tooth-type position vector editor. Dropdown selects tooth type (central incisor, premolar, molar); editable fields for `rx`, `ry`, `rz`, and `w` (all mm). Changing the tooth type loads that type's current values. Edits take effect immediately on the next sample cycle. A "Reset to Defaults" button restores the selected type's factory values.
 - **Sessions** (`SessionsTab`): paginated table (20 rows/page) of all recording sessions from the SQLite database. In-progress sessions show "— recording —" in red. Clicking a file path opens an inline CSV viewer (first 500 rows). Auto-refreshes every 2 seconds. Missing files show an error message instead of crashing.
 
 ### Deployment
