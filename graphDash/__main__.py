@@ -6,13 +6,39 @@ from PyQt6.QtWidgets import QApplication
 
 from graphDash import session_manager
 from graphDash.ui import theme
-from graphDash.protocol import Sensor
-from graphDash.config import load_sensor_config, build_simulation_cells
+from graphDash.config import load_sensor_config, save_sensor_config, build_simulation_cells
 from graphDash.datastore import DataStore
 from graphDash.csv_logger import CSVLogger
 from graphDash.force_moment import PositionVectors, TareOffsets
 from graphDash.sampler import Sampler
 from graphDash.ui.dashboard import Dashboard
+from graphDash.ui.startup_config import StartupConfigDialog
+
+
+def _initial_sensor_configs(config, args):
+    """Get the sensor list to seed the startup dialog with.
+
+    Uses whatever's in sensors.yaml if present. In debug mode, pads or trims
+    to `--cells` (default 1) so users get a usable starting point on a
+    freshly cloned repo.
+    """
+    sensors = []
+    if config and isinstance(config.get('sensors'), list):
+        sensors = [dict(s) for s in config['sensors']]
+
+    if args.debug:
+        n_cells = max(1, args.cells) if args.cells is not None else max(1, len(sensors))
+        if len(sensors) < n_cells:
+            for i in range(len(sensors), n_cells):
+                sensors.append({
+                    "name": f"Cell {i + 1}",
+                    "bus": 0,
+                    "dev": 0,
+                    "csb_gpio": 0,
+                })
+        else:
+            sensors = sensors[:n_cells]
+    return sensors
 
 
 def main(argv=None):
@@ -28,50 +54,43 @@ def main(argv=None):
         help="Sensor configuration YAML file")
     args = parser.parse_args(argv)
 
-    config = load_sensor_config(args.config)
-    names = []
-    teeth = []
-    tooth_types = []
-    if config and isinstance(config.get('sensors'), list):
-        names = [sensor.get('name', f"Cell {i+1}")
-                 for i, sensor in enumerate(config['sensors'])]
-        teeth = [sensor.get('tooth') for sensor in config['sensors']]
-        tooth_types = [sensor.get('tooth_type') for sensor in config['sensors']]
+    app = QApplication([sys.argv[0]])
+    pg.setConfigOptions(antialias=True, background=theme.PLOT_BG, foreground=theme.PLOT_FG)
+    theme.apply(app)
 
-    if args.debug:
-        if args.cells is not None:
-            n_cells = max(1, args.cells)
-            if len(names) < n_cells:
-                names += [f"Cell {len(names) + j + 1}"
-                          for j in range(n_cells - len(names))]
-                teeth += [None] * (n_cells - len(teeth))
-                tooth_types += [None] * (n_cells - len(tooth_types))
-            else:
-                names = names[:n_cells]
-                teeth = teeth[:n_cells]
-                tooth_types = tooth_types[:n_cells]
-        elif not names:
-            names = ["Cell 1"]
-            teeth = [None]
-            tooth_types = [None]
-        cells = []
+    config = load_sensor_config(args.config)
+    initial_sensors = _initial_sensor_configs(config, args)
+
+    # Persist any padding/trimming done for debug mode so the dialog and disk
+    # start in sync.
+    if args.debug and initial_sensors:
+        save_sensor_config(args.config, initial_sensors)
+
+    dialog = StartupConfigDialog(
+        initial_sensors, args.config, initial_debug=args.debug)
+    if dialog.exec() != dialog.DialogCode.Accepted or dialog.result_mode is None:
+        sys.exit(0)
+
+    simulate = (dialog.result_mode == "debug")
+    sensor_configs = dialog.sensor_configs
+    cells = dialog.ready_cells if not simulate else []
+
+    if not sensor_configs:
+        print("No sensors configured. Exiting.")
+        sys.exit(1)
+
+    names = [s.get("name", f"Cell {i+1}") for i, s in enumerate(sensor_configs)]
+    teeth = [s.get("tooth") for s in sensor_configs]
+    tooth_types = [s.get("tooth_type") for s in sensor_configs]
+    n_cells = len(sensor_configs)
+
+    if simulate:
         simulation_cells = build_simulation_cells(names)
         print(f"Starting in debug mode with {len(simulation_cells)} simulated cells.")
     else:
-        if not config or 'sensors' not in config:
-            raise FileNotFoundError(
-                f"Sensor configuration not found at {args.config}. "
-                "Use --debug to run without hardware.")
-        cells = []
-        for sensor in config['sensors']:
-            cells.append(Sensor(sensor['name'], sensor['bus'], sensor['dev'], sensor['csb_gpio']))
-        for c in cells:
-            print(f"Initializing {c.name}...")
-            c.init()
-        print("All cells ready.\n")
         simulation_cells = build_simulation_cells(names)
+        print(f"Starting with {len(cells)} hardware cells.")
 
-    n_cells = len(names) if names else len(cells)
     store = DataStore(n_cells)
 
     session_manager.init_db()
@@ -83,27 +102,12 @@ def main(argv=None):
     pos_vectors = PositionVectors()
     tare_offsets = TareOffsets(n_cells)
 
-    sampler = Sampler(cells, store, simulation_cells=simulation_cells, simulate=args.debug,
+    sampler = Sampler(cells, store, simulation_cells=simulation_cells, simulate=simulate,
                       csv_logger=csv_logger, cell_names=names,
                       pos_vectors=pos_vectors, cell_tooth_types=tooth_types,
                       tare_offsets=tare_offsets)
     sampler.start()
 
-    # Ensure teeth/tooth_types lists match n_cells
-    if len(teeth) < n_cells:
-        teeth += [None] * (n_cells - len(teeth))
-    else:
-        teeth = teeth[:n_cells]
-    if len(tooth_types) < n_cells:
-        tooth_types += [None] * (n_cells - len(tooth_types))
-    else:
-        tooth_types = tooth_types[:n_cells]
-
-    sensor_configs = config.get('sensors', []) if config else []
-
-    app = QApplication([sys.argv[0]])
-    pg.setConfigOptions(antialias=True, background=theme.PLOT_BG, foreground=theme.PLOT_FG)
-    theme.apply(app)
     win = Dashboard(sampler, store, n_cells, csv_logger=csv_logger,
                     tooth_per_cell=teeth, pos_vectors=pos_vectors,
                     config_path=args.config, sensor_configs=sensor_configs,

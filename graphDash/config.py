@@ -40,3 +40,40 @@ def build_simulation_cells(names):
             phase=i * 0.7,
         ))
     return cells
+
+
+def try_init_sensors(sensor_configs):
+    """Attempt to construct + init a Sensor for each config entry.
+
+    Returns (results, all_ok) where results is a list of dicts, one per input
+    row, each with keys: {"config", "cell", "ok", "error"}. `cell` is the
+    initialized Sensor on success, None on failure. Callers can filter for
+    ok==True to get the working cells.
+
+    Never raises for hardware/wiring issues — the whole point is to surface
+    those in the config UI. It does still raise if the config itself is
+    malformed (missing required keys, non-int fields, etc.), because that's
+    a bug the user needs to see, not a per-cell failure.
+    """
+    from graphDash.protocol import Sensor
+
+    results = []
+    all_ok = True
+    for cfg in sensor_configs:
+        entry = {"config": cfg, "cell": None, "ok": False, "error": ""}
+        cell = None
+        try:
+            cell = Sensor(cfg["name"], cfg["bus"], cfg["dev"], cfg["csb_gpio"])
+            cell.init()
+            entry["cell"] = cell
+            entry["ok"] = True
+        except Exception as exc:
+            entry["error"] = str(exc) or exc.__class__.__name__
+            all_ok = False
+            if cell is not None:
+                try:
+                    cell.stop()
+                except Exception:
+                    pass
+        results.append(entry)
+    return results, all_ok
