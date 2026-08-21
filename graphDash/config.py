@@ -1,8 +1,83 @@
 import os
+from dataclasses import dataclass
+from typing import Callable
 
 import yaml
 
 from graphDash.protocol import DummySensor
+
+
+# ---------------------------------------------------------------------------
+# Sensor-config schema — the single source of truth for the shape of one
+# sensor row: its fields, their order, defaults, coercion, and which fields
+# are optional (omitted when empty). Everything that reads, writes, edits, or
+# seeds a sensor config drives off SENSOR_FIELDS instead of re-listing the
+# field set: save_sensor_config() serializes with it, default_sensor() seeds
+# with it, and the UI editor builds its columns / parses its table with it.
+# Add a field here and it flows to all of them.
+# ---------------------------------------------------------------------------
+
+def _to_int(raw, default=0):
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_int_or_none(raw):
+    text = "" if raw is None else str(raw).strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+@dataclass(frozen=True)
+class SensorField:
+    key: str            # dict key / YAML key
+    label: str          # column header in the editor table
+    default: object     # value for a fresh row (required fields) / empty marker
+    optional: bool      # optional fields are omitted from YAML when empty
+    widget: str         # "text" or "choice" — how the editor renders/reads it
+    parse: Callable     # raw cell value -> stored value (None => drop, if optional)
+
+
+SENSOR_FIELDS = (
+    SensorField("name",       "Name",       "",   False, "text",   lambda r: "" if r is None else str(r)),
+    SensorField("bus",        "Bus",        0,    False, "text",   _to_int),
+    SensorField("dev",        "Dev",        0,    False, "text",   _to_int),
+    SensorField("csb_gpio",   "CSB GPIO",   0,    False, "text",   _to_int),
+    SensorField("tooth",      "Tooth",      None, True,  "text",   _to_int_or_none),
+    SensorField("tooth_type", "Tooth Type", None, True,  "choice", lambda r: r or None),
+)
+
+
+def default_sensor(index):
+    """A fresh sensor-config row with schema defaults. `index` is 0-based;
+    the row is named "Cell <index+1>". Optional fields are left unset."""
+    row = {f.key: f.default for f in SENSOR_FIELDS if not f.optional}
+    row["name"] = f"Cell {index + 1}"
+    return row
+
+
+def serialize_sensors(sensors):
+    """Project each sensor dict onto the schema: required fields always
+    present (in schema order), optional fields dropped when empty."""
+    ordered = []
+    for s in sensors:
+        entry = {}
+        for f in SENSOR_FIELDS:
+            val = s.get(f.key, f.default)
+            if f.optional:
+                if val is None or val == "":
+                    continue
+                entry[f.key] = val
+            else:
+                entry[f.key] = f.default if val is None else val
+        ordered.append(entry)
+    return ordered
 
 
 def load_sensor_config(path):
@@ -13,18 +88,7 @@ def load_sensor_config(path):
 
 
 def save_sensor_config(path, sensors):
-    ordered = []
-    for s in sensors:
-        entry = {}
-        entry["name"] = s.get("name", "")
-        entry["bus"] = s.get("bus", 0)
-        entry["dev"] = s.get("dev", 0)
-        entry["csb_gpio"] = s.get("csb_gpio", 0)
-        if s.get("tooth") is not None:
-            entry["tooth"] = s["tooth"]
-        if s.get("tooth_type"):
-            entry["tooth_type"] = s["tooth_type"]
-        ordered.append(entry)
+    ordered = serialize_sensors(sensors)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'w') as f:
         yaml.dump({"sensors": ordered}, f, default_flow_style=False, sort_keys=False)

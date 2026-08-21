@@ -6,7 +6,9 @@ from PyQt6.QtWidgets import QApplication
 
 from graphDash import session_manager
 from graphDash.ui import theme
-from graphDash.config import load_sensor_config, save_sensor_config, build_simulation_cells
+from graphDash.config import (
+    load_sensor_config, save_sensor_config, build_simulation_cells, default_sensor,
+)
 from graphDash.datastore import DataStore
 from graphDash.csv_logger import CSVLogger
 from graphDash.force_moment import PositionVectors, TareOffsets
@@ -30,12 +32,7 @@ def _initial_sensor_configs(config, args):
         n_cells = max(1, args.cells) if args.cells is not None else max(1, len(sensors))
         if len(sensors) < n_cells:
             for i in range(len(sensors), n_cells):
-                sensors.append({
-                    "name": f"Cell {i + 1}",
-                    "bus": 0,
-                    "dev": 0,
-                    "csb_gpio": 0,
-                })
+                sensors.append(default_sensor(i))
         else:
             sensors = sensors[:n_cells]
     return sensors

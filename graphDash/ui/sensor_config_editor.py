@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QColor, QBrush
 
+from graphDash import config
 from graphDash.ui import theme
 
 
@@ -40,7 +41,7 @@ class SensorConfigEditor(QWidget):
         layout.setSpacing(10)
 
         self.table = QTableWidget()
-        cols = ["Name", "Bus", "Dev", "CSB GPIO", "Tooth", "Tooth Type"]
+        cols = [f.label for f in config.SENSOR_FIELDS]
         if show_status_column:
             cols.append("Status")
         self.table.setColumnCount(len(cols))
@@ -115,33 +116,29 @@ class SensorConfigEditor(QWidget):
         self._building = True
         self.table.setRowCount(len(self.sensors))
         for row, sensor in enumerate(self.sensors):
-            self.table.setItem(row, 0, QTableWidgetItem(
-                sensor.get("name", "")))
-            self.table.setItem(row, 1, QTableWidgetItem(
-                str(sensor.get("bus", 0))))
-            self.table.setItem(row, 2, QTableWidgetItem(
-                str(sensor.get("dev", 0))))
-            self.table.setItem(row, 3, QTableWidgetItem(
-                str(sensor.get("csb_gpio", 0))))
-
-            tooth = sensor.get("tooth")
-            self.table.setItem(row, 4, QTableWidgetItem(
-                str(tooth) if tooth is not None else ""))
-
-            combo = QComboBox()
-            for key in TOOTH_TYPE_OPTIONS:
-                combo.addItem(TOOTH_TYPE_DISPLAY[key], key)
-            current_type = sensor.get("tooth_type", "")
-            if current_type in TOOTH_TYPE_OPTIONS:
-                combo.setCurrentIndex(TOOTH_TYPE_OPTIONS.index(current_type))
-            combo.currentIndexChanged.connect(
-                lambda _, r=row: self._on_tooth_type_changed(r))
-            self.table.setCellWidget(row, 5, combo)
+            for col, field in enumerate(config.SENSOR_FIELDS):
+                if field.widget == "choice":
+                    self.table.setCellWidget(row, col, self._make_tooth_type_combo(row, sensor))
+                else:
+                    value = sensor.get(field.key, field.default)
+                    text = "" if value is None else str(value)
+                    self.table.setItem(row, col, QTableWidgetItem(text))
 
             if self.show_status_column:
                 self._render_status_cell(row)
                 self._paint_row(row)
         self._building = False
+
+    def _make_tooth_type_combo(self, row, sensor):
+        combo = QComboBox()
+        for key in TOOTH_TYPE_OPTIONS:
+            combo.addItem(TOOTH_TYPE_DISPLAY[key], key)
+        current_type = sensor.get("tooth_type") or ""
+        if current_type in TOOTH_TYPE_OPTIONS:
+            combo.setCurrentIndex(TOOTH_TYPE_OPTIONS.index(current_type))
+        combo.currentIndexChanged.connect(
+            lambda _, r=row: self._on_tooth_type_changed(r))
+        return combo
 
     def _render_status_cell(self, row):
         if not self.show_status_column:
@@ -158,7 +155,14 @@ class SensorConfigEditor(QWidget):
         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
         if msg:
             item.setToolTip(msg)
-        self.table.setItem(row, col, item)
+        # Programmatic write — mute the table so this doesn't re-fire
+        # cellChanged back into _on_cell_changed (which would recurse forever
+        # since it re-renders this very cell).
+        prev = self.table.blockSignals(True)
+        try:
+            self.table.setItem(row, col, item)
+        finally:
+            self.table.blockSignals(prev)
 
     def _paint_row(self, row):
         if not self.show_status_column:
@@ -173,14 +177,20 @@ class SensorConfigEditor(QWidget):
             bg = QColor(theme.ACCENT_DANGER)
             bg.setAlpha(48)
         editable_cols = range(self.table.columnCount() - 1) if self.show_status_column else range(self.table.columnCount())
-        for col in editable_cols:
-            item = self.table.item(row, col)
-            if item is None:
-                continue
-            if bg is None:
-                item.setData(Qt.ItemDataRole.BackgroundRole, None)
-            else:
-                item.setBackground(QBrush(bg))
+        # Programmatic background changes also emit cellChanged; mute them so
+        # painting a row can't re-enter _on_cell_changed.
+        prev = self.table.blockSignals(True)
+        try:
+            for col in editable_cols:
+                item = self.table.item(row, col)
+                if item is None:
+                    continue
+                if bg is None:
+                    item.setData(Qt.ItemDataRole.BackgroundRole, None)
+                else:
+                    item.setBackground(QBrush(bg))
+        finally:
+            self.table.blockSignals(prev)
 
     def _on_cell_changed(self, row, col):
         if self._building:
@@ -202,42 +212,21 @@ class SensorConfigEditor(QWidget):
     def _sync_from_table(self):
         for row in range(min(self.table.rowCount(), len(self.sensors))):
             sensor = self.sensors[row]
-
-            item = self.table.item(row, 0)
-            sensor["name"] = item.text() if item else ""
-
-            for col, key in [(1, "bus"), (2, "dev"), (3, "csb_gpio")]:
-                item = self.table.item(row, col)
-                try:
-                    sensor[key] = int(item.text()) if item else 0
-                except ValueError:
-                    sensor[key] = 0
-
-            item = self.table.item(row, 4)
-            if item and item.text().strip():
-                try:
-                    sensor["tooth"] = int(item.text())
-                except ValueError:
-                    sensor.pop("tooth", None)
-            else:
-                sensor.pop("tooth", None)
-
-            combo = self.table.cellWidget(row, 5)
-            if combo:
-                tt = combo.currentData()
-                if tt:
-                    sensor["tooth_type"] = tt
+            for col, field in enumerate(config.SENSOR_FIELDS):
+                if field.widget == "choice":
+                    widget = self.table.cellWidget(row, col)
+                    raw = widget.currentData() if widget else None
                 else:
-                    sensor.pop("tooth_type", None)
+                    item = self.table.item(row, col)
+                    raw = item.text() if item else ""
+                value = field.parse(raw)
+                if field.optional and value is None:
+                    sensor.pop(field.key, None)
+                else:
+                    sensor[field.key] = value
 
     def _add_sensor(self):
-        n = len(self.sensors) + 1
-        self.sensors.append({
-            "name": f"Cell {n}",
-            "bus": 0,
-            "dev": 0,
-            "csb_gpio": 0,
-        })
+        self.sensors.append(config.default_sensor(len(self.sensors)))
         self._row_status.append((None, ""))
         self._rebuild_table()
         self.sensors_changed.emit(self.get_sensors())
