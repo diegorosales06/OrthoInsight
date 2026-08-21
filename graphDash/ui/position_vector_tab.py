@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QFont
 from PyQt6.QtCore import Qt
 
-from graphDash.force_moment import TOOTH_TYPES, DEFAULTS
+from graphDash.force_moment import TOOTH_TYPES
 from graphDash.ui import theme
 
 
@@ -30,7 +30,7 @@ class PositionVectorTab(QWidget):
             f"font-size: {theme.FONT_SECTION}pt; font-weight: 600; color: {theme.ON_SURFACE};")
         layout.addWidget(title)
 
-        sub = QLabel("Edit the position vector r = [rx, ry, rz] and constant w per tooth type.")
+        sub = QLabel("Edit the position vector r = [rx, ry, rz] per tooth type.")
         sub.setStyleSheet(f"color: {theme.ON_SURFACE_MUTED}; font-size: {theme.FONT_BODY}pt;")
         layout.addWidget(sub)
         layout.addSpacing(6)
@@ -66,9 +66,6 @@ class PositionVectorTab(QWidget):
         self.spin_rz = self._make_spin(-200.0, 200.0, 17.15)
         form.addRow("rz  (mm):", self.spin_rz)
 
-        self.spin_w = self._make_spin(0.01, 200.0, 4.7)
-        form.addRow("w  (mm):", self.spin_w)
-
         params_group.setLayout(form)
         layout.addWidget(params_group)
 
@@ -81,7 +78,6 @@ class PositionVectorTab(QWidget):
             "rx = lateral offset (default 0)",
             "ry = position vector y component",
             "rz = position vector z component (tooth height)",
-            "w  = user-defined constant",
         ]:
             lbl = QLabel(line)
             lbl.setFont(desc_font)
@@ -121,15 +117,14 @@ class PositionVectorTab(QWidget):
 
     def _load_values(self):
         pv = self.pos_vectors.get(self._current_type())
-        for spin in (self.spin_rx, self.spin_ry, self.spin_rz, self.spin_w):
+        for spin in (self.spin_rx, self.spin_ry, self.spin_rz):
             spin.blockSignals(True)
 
         self.spin_rx.setValue(pv["rx"])
         self.spin_ry.setValue(pv["ry"])
         self.spin_rz.setValue(pv["rz"])
-        self.spin_w.setValue(pv["w"])
 
-        for spin in (self.spin_rx, self.spin_ry, self.spin_rz, self.spin_w):
+        for spin in (self.spin_rx, self.spin_ry, self.spin_rz):
             spin.blockSignals(False)
 
     def _value_changed(self):
@@ -138,7 +133,6 @@ class PositionVectorTab(QWidget):
             rx=self.spin_rx.value(),
             ry=self.spin_ry.value(),
             rz=self.spin_rz.value(),
-            w=self.spin_w.value(),
         )
 
     def _reset(self):

@@ -135,12 +135,12 @@ class CSVLogger(threading.Thread):
                 except Exception:
                     if len(self.buffer) > 0:
                         self._flush()
-            self._flush()
         finally:
-            with self._lock:
-                self._close_file_locked()
-                self._close_manual_file_locked()
-                self._reset_recording_state_locked()
+            # Route shutdown through the normal stop path so an in-progress
+            # recording is flushed, its files closed, AND its session ended in
+            # the DB (otherwise the row keeps end_time = NULL forever). No-op
+            # when nothing is recording.
+            self.stop_recording()
 
     # ---- internals ----
 

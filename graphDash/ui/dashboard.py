@@ -324,8 +324,7 @@ class Dashboard(QMainWindow):
         self.sampler.cell_tooth_types = tooth_types
         self.tooth_per_cell = teeth
 
-        if hasattr(self.arch_tab, 'tooth_per_cell'):
-            self.arch_tab.tooth_per_cell = teeth[:self.n_cells]
+        self.arch_tab.set_tooth_per_cell(teeth[:self.n_cells])
 
         self.cells_tab.set_names(names)
 

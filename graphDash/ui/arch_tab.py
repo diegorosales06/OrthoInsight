@@ -404,15 +404,20 @@ class ArchView(QWidget):
 class ArchTab(QWidget):
     """Side-by-side force (Fz) and moment (|M|) heatmap arches."""
 
+    @staticmethod
+    def _build_tooth_to_cell(tooth_per_cell):
+        mapping = {}
+        for cell_idx, tooth in enumerate(tooth_per_cell or []):
+            if tooth is not None:
+                mapping[int(tooth)] = cell_idx
+        return mapping
+
     def __init__(self, store, tooth_per_cell=None):
         super().__init__()
         self.store = store
         self.tooth_per_cell = tooth_per_cell or []
 
-        tooth_to_cell = {}
-        for cell_idx, tooth in enumerate(self.tooth_per_cell):
-            if tooth is not None:
-                tooth_to_cell[int(tooth)] = cell_idx
+        tooth_to_cell = self._build_tooth_to_cell(self.tooth_per_cell)
 
         self.force_view = ArchView(
             store,
@@ -438,6 +443,16 @@ class ArchTab(QWidget):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._refresh)
         self.timer.start(REFRESH_MS)
+
+    def set_tooth_per_cell(self, tooth_per_cell):
+        """Re-map which load cell drives each tooth and push the new mapping
+        to both arch views, so a live sensor-config change is reflected in the
+        heatmaps. The views read force/moment values from the DataStore, which
+        already holds post-tare, post-compensation readings."""
+        self.tooth_per_cell = list(tooth_per_cell or [])
+        mapping = self._build_tooth_to_cell(self.tooth_per_cell)
+        self.force_view.tooth_to_cell = mapping
+        self.moment_view.tooth_to_cell = mapping
 
     def _refresh(self):
         self.force_view.update()
