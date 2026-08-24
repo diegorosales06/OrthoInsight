@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (
     QMainWindow, QTabWidget, QTabBar, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QSpinBox, QComboBox, QFrame, QMenu,
+    QLabel, QPushButton, QSpinBox, QComboBox, QFrame, QMenu, QLineEdit,
 )
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QActionGroup
@@ -168,6 +168,15 @@ class Dashboard(QMainWindow):
 
         ctrl.addStretch()
 
+        # Point name — user label stamped onto every cell's manual-log row
+        self.point_name_edit = QLineEdit()
+        self.point_name_edit.setPlaceholderText("Point name (optional)")
+        self.point_name_edit.setMinimumHeight(38)
+        self.point_name_edit.setMaximumWidth(180)
+        self.point_name_edit.setEnabled(False)
+        self.point_name_edit.returnPressed.connect(self._log_manual_point)
+        ctrl.addWidget(_labeled_control("POINT NAME", self.point_name_edit))
+
         # Log Point (manual logging) — ghost
         self.log_point_btn = QPushButton("Log Point")
         self.log_point_btn.setMinimumHeight(38)
@@ -194,6 +203,14 @@ class Dashboard(QMainWindow):
         self._toggle_debug()
 
         root.addWidget(ctrl_container)
+
+        # Manual-log confirmation flag — rendered plainly on the window
+        # background (no card/border/tint), right-aligned under the control bar.
+        self.log_confirm_label = QLabel("")
+        self.log_confirm_label.setStyleSheet(
+            f"font-size: {theme.FONT_CAPTION}pt; color: {theme.ACCENT_SUCCESS}; "
+            f"font-weight: 600; background: transparent; border: none;")
+        root.addWidget(self.log_confirm_label, alignment=Qt.AlignmentFlag.AlignRight)
 
         # ---- Tabs ----
         self.tabs = QTabWidget()
@@ -260,6 +277,7 @@ class Dashboard(QMainWindow):
             self.start_btn.setProperty("variant", "danger")
             self._restyle(self.start_btn)
             self.log_point_btn.setEnabled(True)
+            self.point_name_edit.setEnabled(True)
             self._set_status("recording")
         else:
             self.sampler.running = False
@@ -269,6 +287,8 @@ class Dashboard(QMainWindow):
             self.start_btn.setProperty("variant", "primary")
             self._restyle(self.start_btn)
             self.log_point_btn.setEnabled(False)
+            self.point_name_edit.setEnabled(False)
+            self.log_confirm_label.setText("")
             self.sessions_tab.refresh()
             self._set_status("idle")
 
@@ -304,12 +324,36 @@ class Dashboard(QMainWindow):
 
         import time
         timestamp = time.time()
+        label = self.point_name_edit.text().strip()
 
+        logged = False
         for cell_idx in range(len(self.cell_tabs)):
             t, arrs = self.store.get_cell(cell_idx)
             if len(t) > 0:
                 force_moment = [arr[-1] for arr in arrs]
-                self.csv_logger.log_manual_point(timestamp, f"Cell {cell_idx + 1}", force_moment)
+                cell_id = self._cell_name(cell_idx)
+                self.csv_logger.log_manual_point(timestamp, cell_id, force_moment, label)
+                logged = True
+
+        if logged:
+            self._show_log_confirmation(label)
+            self.point_name_edit.clear()
+
+    def _cell_name(self, cell_idx):
+        """Sensor name from sensors.yaml for this cell (matches the auto log's
+        cell_id, which the sampler writes from the same names list)."""
+        names = self.sampler.cell_names
+        if cell_idx < len(names):
+            return names[cell_idx]
+        return f"Cell {cell_idx + 1}"
+
+    def _show_log_confirmation(self, label):
+        """Flash a transient 'point logged' flag on the window background (~2.5 s)."""
+        if label:
+            self.log_confirm_label.setText(f'✓ Logged "{label}"')
+        else:
+            self.log_confirm_label.setText("✓ Point logged")
+        QTimer.singleShot(2500, lambda: self.log_confirm_label.setText(""))
 
     def _on_config_changed(self, sensors):
         if self.start_btn.isChecked():

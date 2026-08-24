@@ -62,7 +62,7 @@ class CSVLogger(threading.Thread):
                 self.manual_file_handle = open(manual_log_file, 'w', newline='', buffering=1)
                 self.manual_csv_writer = csv.writer(self.manual_file_handle)
                 self.manual_csv_writer.writerow(
-                    ['timestamp', 'cell_id', 'Fx', 'Fy', 'Fz', 'Mx', 'My', 'Mz'])
+                    ['timestamp', 'label', 'cell_id', 'Fx', 'Fy', 'Fz', 'Mx', 'My', 'Mz'])
                 self.manual_file = manual_log_file
 
                 # Register single session with both file paths
@@ -104,14 +104,14 @@ class CSVLogger(threading.Thread):
             relative_time = timestamp_absolute - self.start_time
         self.queue.put((relative_time, cell_id, force_moment_values))
 
-    def log_manual_point(self, timestamp_absolute, cell_id, force_moment_values):
+    def log_manual_point(self, timestamp_absolute, cell_id, force_moment_values, label=""):
         """Log a single manual point immediately."""
         with self._lock:
             if not self.recording or self.manual_csv_writer is None:
                 return
             relative_time = timestamp_absolute - self.start_time
             try:
-                row = [f"{relative_time:.6f}", cell_id] + [f"{v:.6f}" for v in force_moment_values]
+                row = [f"{relative_time:.6f}", label, cell_id] + [f"{v:.6f}" for v in force_moment_values]
                 self.manual_csv_writer.writerow(row)
                 self.manual_file_handle.flush()
             except Exception as e:
