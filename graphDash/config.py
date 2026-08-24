@@ -119,7 +119,16 @@ def try_init_sensors(sensor_configs):
     malformed (missing required keys, non-int fields, etc.), because that's
     a bug the user needs to see, not a per-cell failure.
     """
+    from graphDash import csb as csb_bank
     from graphDash.protocol import Sensor
+
+    # Park every CSB line high BEFORE any cell is initialized. All connectors
+    # share one MISO net and a Conv.BD only releases it while its own CSB is
+    # high, so a not-yet-claimed pin (GPIO 13/19/26 power up pulled *down*)
+    # would jam the bus for whichever cell we're initializing. See csb.py.
+    csb_bank.park_all(
+        cfg["csb_gpio"] for cfg in sensor_configs if cfg.get("csb_gpio") is not None
+    )
 
     results = []
     all_ok = True

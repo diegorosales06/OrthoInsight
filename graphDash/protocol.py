@@ -2,12 +2,11 @@ import time
 
 try:
     import spidev
-    from gpiozero import DigitalOutputDevice
 except ImportError:
     spidev = None
-    DigitalOutputDevice = None
 import numpy as np
 
+from graphDash import csb as csb_bank
 from graphDash.constants import (
     CMD_START, CMD_DATA2, CMD_BOOT, CMD_STOP, CMD_RESET, CMD_STATUS,
     CMD_INTERVAL, CMD_COEFF, STT_STANDBY, STT_READY, N_AXES,
@@ -21,17 +20,18 @@ def s24(b):
 
 class Sensor:
     def __init__(self, name, bus, dev, csb_gpio):
-        if spidev is None or DigitalOutputDevice is None:
+        if spidev is None:
             raise RuntimeError(
-                "Real sensors require spidev and gpiozero. "
+                "Real sensors require spidev. "
                 "Run with --debug to use the UI without hardware.")
         self.name = name
+        # Claim CSB first, so this cell is deasserted before its SPI handle
+        # ever clocks the shared bus.
+        self.csb = csb_bank.acquire(csb_gpio)
         self.spi = spidev.SpiDev()
         self.spi.open(bus, dev)
         self.spi.mode = 0b11
         self.spi.max_speed_hz = 2_000_000
-        self.csb = DigitalOutputDevice(csb_gpio, active_high=False,
-                                       initial_value=False)
         self.coeff = [[0]*6 for _ in range(6)]
         self.spi.xfer2([0x00])
 
@@ -84,7 +84,9 @@ class Sensor:
         try: self._cmd([CMD_STOP], 1)
         except Exception: pass
         self.spi.close()
-        self.csb.close()
+        # Leave the pin claimed and driven high: closing it reverts to a
+        # pulled-down input, which re-jams the shared MISO net (see csb.py).
+        self.csb.off()
 
 
 class DummySensor:
@@ -123,6 +125,5 @@ class DummySensor:
 
     def stop(self):
         pass
-        self.csb.close()
 
 
