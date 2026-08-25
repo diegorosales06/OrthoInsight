@@ -192,6 +192,20 @@ class Dashboard(QMainWindow):
         clear_btn.clicked.connect(self._clear_data)
         ctrl.addWidget(clear_btn)
 
+        # Tare All / Clear Tare — global, applies to every cell at once
+        self.tare_btn = QPushButton("Tare All")
+        self.tare_btn.setMinimumHeight(38)
+        self.tare_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.tare_btn.setToolTip("Zero every cell from the same sample cycle")
+        self.tare_btn.clicked.connect(self._tare_all)
+        ctrl.addWidget(self.tare_btn)
+
+        self.clear_tare_btn = QPushButton("Clear Tare")
+        self.clear_tare_btn.setMinimumHeight(38)
+        self.clear_tare_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.clear_tare_btn.clicked.connect(self._clear_tare)
+        ctrl.addWidget(self.clear_tare_btn)
+
         # Debug / simulation mode — accent when on
         self.debug_btn = QPushButton("Debug Mode")
         self.debug_btn.setMinimumHeight(38)
@@ -221,8 +235,7 @@ class Dashboard(QMainWindow):
             self.sensor_configs[i].get("name", f"Cell {i+1}") if i < len(self.sensor_configs) else f"Cell {i+1}"
             for i in range(n_cells)
         ]
-        self.cells_tab = CellsTab(n_cells, store, names,
-                                  sampler=sampler, tare_offsets=tare_offsets)
+        self.cells_tab = CellsTab(n_cells, store, names, tare_offsets=tare_offsets)
         self.cell_tabs = self.cells_tab.cell_tabs
         self.cells_index = self.tabs.addTab(self.cells_tab, "Cell Graphs")
         self.cell_tab_bar.cell_picked.connect(self.cells_tab.select)
@@ -317,6 +330,29 @@ class Dashboard(QMainWindow):
     def _clear_data(self):
         self.store.clear()
 
+    def _tare_all(self):
+        """Zero every cell at once, all from the same sampler cycle."""
+        if self.sampler is None or self.tare_offsets is None:
+            return
+        snap = self.sampler.get_all_last_raw()
+        if not snap:
+            self._flash("Tare needs live data — start recording first.", warning=True)
+            return
+        self.tare_offsets.set_all(snap)
+        self._refresh_offset_labels()
+        self._flash("✓ Tared all cells")
+
+    def _clear_tare(self):
+        if self.tare_offsets is None:
+            return
+        self.tare_offsets.clear_all()
+        self._refresh_offset_labels()
+        self._flash("✓ Tare cleared")
+
+    def _refresh_offset_labels(self):
+        for t in self.cell_tabs:
+            t._update_offset_label()
+
     def _log_manual_point(self):
         """Capture and log current data point for all cells."""
         if not self.csv_logger:
@@ -347,13 +383,17 @@ class Dashboard(QMainWindow):
             return names[cell_idx]
         return f"Cell {cell_idx + 1}"
 
-    def _show_log_confirmation(self, label):
-        """Flash a transient 'point logged' flag on the window background (~2.5 s)."""
-        if label:
-            self.log_confirm_label.setText(f'✓ Logged "{label}"')
-        else:
-            self.log_confirm_label.setText("✓ Point logged")
+    def _flash(self, text, warning=False):
+        """Flash a transient message on the window background (~2.5 s)."""
+        color = theme.ACCENT_WARNING if warning else theme.ACCENT_SUCCESS
+        self.log_confirm_label.setStyleSheet(
+            f"font-size: {theme.FONT_CAPTION}pt; color: {color}; "
+            f"font-weight: 600; background: transparent; border: none;")
+        self.log_confirm_label.setText(text)
         QTimer.singleShot(2500, lambda: self.log_confirm_label.setText(""))
+
+    def _show_log_confirmation(self, label):
+        self._flash(f'✓ Logged "{label}"' if label else "✓ Point logged")
 
     def _on_config_changed(self, sensors):
         if self.start_btn.isChecked():
@@ -373,6 +413,12 @@ class Dashboard(QMainWindow):
         self.cells_tab.set_names(names)
 
         self.store.clear()
+
+        missing_types = [names[i] for i, tt in enumerate(tooth_types) if not tt]
+        if missing_types:
+            self._flash(
+                f"No tooth type for {', '.join(missing_types)} — compensation skipped",
+                warning=True)
 
         if len(sensors) != self.n_cells:
             self.sensor_config_tab.status_label.setText(

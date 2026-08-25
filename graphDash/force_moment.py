@@ -58,6 +58,33 @@ class TareOffsets:
             if 0 <= cell_idx < len(self._offsets):
                 self._offsets[cell_idx] = [0.0] * 6
 
+    def set_all(self, offsets_by_idx):
+        """Write every cell's offset in one shot.
+
+        offsets_by_idx maps cell index -> 6-axis offset (a dict or a list).
+        Indices this store doesn't hold are ignored; cells missing from the
+        mapping are zeroed, so one call always leaves a consistent set.
+        """
+        with self._lock:
+            for i in range(len(self._offsets)):
+                try:
+                    offset = offsets_by_idx[i]
+                except (KeyError, IndexError, TypeError):
+                    offset = None
+                if offset is None:
+                    self._offsets[i] = [0.0] * 6
+                else:
+                    self._offsets[i] = [float(v) for v in offset][:6]
+
+    def clear_all(self):
+        with self._lock:
+            for i in range(len(self._offsets)):
+                self._offsets[i] = [0.0] * 6
+
+    def __len__(self):
+        with self._lock:
+            return len(self._offsets)
+
 
 def compute_adjusted(raw, tooth_type, pos_vectors):
     """Apply force/moment compensation based on threshold conditions.

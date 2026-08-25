@@ -81,6 +81,15 @@ def main(argv=None):
     tooth_types = [s.get("tooth_type") for s in sensor_configs]
     n_cells = len(sensor_configs)
 
+    # compute_adjusted() only runs for cells that declare a tooth_type; without
+    # one the sampler stores/logs tared raw readings instead. Say so loudly —
+    # the skip is otherwise silent and looks like broken compensation.
+    missing_types = [names[i] for i, tt in enumerate(tooth_types) if not tt]
+    if missing_types:
+        print(f"WARNING: no tooth_type set for {', '.join(missing_types)} — "
+              f"force/moment compensation is SKIPPED for these cells; their "
+              f"graphed and logged values are tared raw readings.")
+
     if simulate:
         simulation_cells = build_simulation_cells(names)
         print(f"Starting in debug mode with {len(simulation_cells)} simulated cells.")

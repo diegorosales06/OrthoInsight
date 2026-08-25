@@ -1,7 +1,7 @@
 import numpy as np
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
 )
 from PyQt6.QtCore import Qt
 import pyqtgraph as pg
@@ -51,11 +51,10 @@ def _readout_card(axis_name, color, unit):
 
 
 class CellTab(QWidget):
-    def __init__(self, cell_idx, store, sampler=None, tare_offsets=None):
+    def __init__(self, cell_idx, store, tare_offsets=None):
         super().__init__()
         self.cell_idx = cell_idx
         self.store = store
-        self.sampler = sampler
         self.tare_offsets = tare_offsets
         self.window_s = DEFAULT_WINDOW_S
         self.ma_n = 1
@@ -106,35 +105,25 @@ class CellTab(QWidget):
         moment_val_row.addStretch()
         layout.addLayout(moment_val_row)
 
-        # --- Tare controls ---
+        # --- Tare readout ---
+        # Read-only: taring is global, driven from the Dashboard control bar
+        # (Tare All / Clear Tare), which calls _update_offset_label() on every
+        # CellTab afterwards.
         tare_row = QHBoxLayout()
         tare_row.setSpacing(10)
 
-        tare_btn = QPushButton("Tare")
-        tare_btn.setMinimumHeight(36)
-        tare_btn.setMinimumWidth(100)
-        tare_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        tare_btn.clicked.connect(self.tare)
-
-        clear_btn = QPushButton("Clear Tare")
-        clear_btn.setMinimumHeight(36)
-        clear_btn.setMinimumWidth(120)
-        clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        clear_btn.clicked.connect(self.clear_tare)
-
-        self.offset_label = QLabel("offset: F[0.000, 0.000, 0.000]  M[0.000, 0.000, 0.000]")
+        self.offset_label = QLabel()
         self.offset_label.setStyleSheet(
             f"color: {theme.ON_SURFACE_MUTED}; "
             f"font-family: 'SF Mono', 'Menlo', 'Consolas', monospace; "
             f"font-size: {theme.FONT_BODY}pt;"
         )
 
-        tare_row.addWidget(tare_btn)
-        tare_row.addWidget(clear_btn)
         tare_row.addWidget(self.offset_label, 1)
         layout.addLayout(tare_row)
 
         self.setLayout(layout)
+        self._update_offset_label()
 
     def _plot_frame(self, plot_widget):
         """Wrap a plot in a rounded card border matching theme."""
@@ -151,19 +140,6 @@ class CellTab(QWidget):
         inner.addWidget(plot_widget)
         frame.setLayout(inner)
         return frame
-
-    def tare(self):
-        if self.sampler is None or self.tare_offsets is None:
-            return
-        raw = self.sampler.get_last_raw(self.cell_idx)
-        self.tare_offsets.set(self.cell_idx, raw)
-        self._update_offset_label()
-
-    def clear_tare(self):
-        if self.tare_offsets is None:
-            return
-        self.tare_offsets.clear(self.cell_idx)
-        self._update_offset_label()
 
     def _current_offset(self):
         if self.tare_offsets is None:

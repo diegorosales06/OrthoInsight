@@ -46,15 +46,15 @@ The `graphDash/` package is the main codebase, with `graphDash.py` at the repo r
 - `protocol.py` — `s24()` 3-byte signed-int decoder, `Sensor` (real SPI hardware), `DummySensor` (fixed-value simulation — returns a constant 6-axis reading). `Sensor.read_all()` returns `[Fx, Fy, Fz, Mx, My, Mz]` in `[N, N, N, N·m, N·m, N·m]`. The matrix-multiply result is right-shifted by 11 bits (÷2048), then forces are divided by 1000 (`0.001 N` LSB → N) and moments by 100000 (`0.00001 N·m` LSB → N·m) per the MMS101 datasheet matrix-operation section. **This per-axis scaling only lives in `graphDash/protocol.py`** — the standalone `stream.py` and `stream_threaded.py` streamers at the repo root still divide all six axes by 1000 (they only read forces, so it doesn't matter there; if you ever add moment support to them, apply the 100000 divisor).
 - `datastore.py` — `DataStore`: thread-safe ring buffer (`collections.deque` + `threading.Lock`, `MAX_BUFFER_SAMPLES=5000`). `get_cell()` supports windowing to the last N seconds and returns time relative to the window's first sample.
 - `csv_logger.py` — `CSVLogger`: long-lived background `threading.Thread` with per-recording lifecycle (see "Recording lifecycle" below).
-- `sampler.py` — `Sampler`: background thread that polls all cells (real or simulated) at `rate_hz`, applies force/moment overrides via `force_moment.compute_adjusted()`, then pushes adjusted readings into `DataStore` and forwards them to `CSVLogger`. `running` gates whether it's actively sampling; `simulate` gates real vs. dummy sensors — both are toggled live from the UI.
+- `sampler.py` — `Sampler`: background thread that polls all cells (real or simulated) at `rate_hz` and runs the sample pipeline (see "Sample pipeline" below), pushing one `readings` list into both `DataStore` and `CSVLogger` so the graph and the CSV can never diverge. `running` gates whether it's actively sampling; `simulate` gates real vs. dummy sensors — both are toggled live from the UI.
 - `force_moment.py` — Force/moment override computation (see "Force/moment overrides" below). Contains `PositionVectors` (thread-safe per-tooth-type position vector store, `r = [rx, ry, rz]`), `TareOffsets`, and `compute_adjusted()` (applies threshold-based force/moment corrections). Importing this module has **no side effects** — the validation harness lives in `tests/test_compensation.py`, not here.
 - `session_manager.py` — SQLite operations for session tracking (see "SQLite session database" below).
 - `config.py` — `load_sensor_config()` / `save_sensor_config()` (YAML), `build_simulation_cells()` (creates `DummySensor` instances), and `try_init_sensors()` (constructs + inits real `Sensor`s, surfacing per-cell wiring failures instead of raising).
 - `paths.py` — Cross-platform path resolution: detects Pi (`/home/sparkrnd` exists) vs. laptop, and returns the appropriate log root, logs directory, and database path.
 - `ui/` — PyQt6 UI widgets:
   - `theme.py` — centralized design tokens (colors, typography scale, spacing) and a global QSS stylesheet applied via `theme.apply(app)`. All UI colors are defined here — components reference `theme.PRIMARY`, `theme.ON_SURFACE`, etc. instead of hardcoding hex values. The palette is white + dark blue (`#055CA3` primary) with semantic accents (coral for danger/stop, amber for debug mode, muted green for success). Plot curve colors remain in `constants.py` since they're data-level, not chrome-level.
-  - `dashboard.py` — `Dashboard` main window: header with title + live status indicator (Idle / Recording), control bar in a rounded card (start/stop, sample rate, rolling window, smoothing, log point, clear data, debug toggle) plus tabbed content area. Buttons use semantic variants via QSS dynamic properties (`variant="primary"`, `"danger"`, `"accent"`).
-  - `cell_tab.py` — `CellTab`: one page per load cell with force plot, moment plot, live readouts, tare/clear-tare, and a causal moving-average smoother.
+  - `dashboard.py` — `Dashboard` main window: header with title + live status indicator (Idle / Recording), control bar in a rounded card (start/stop, sample rate, rolling window, smoothing, log point, clear data, tare all / clear tare, debug toggle) plus tabbed content area. Buttons use semantic variants via QSS dynamic properties (`variant="primary"`, `"danger"`, `"accent"`).
+  - `cell_tab.py` — `CellTab`: one page per load cell with force plot, moment plot, live readouts, a read-only tare-offset line, and a causal moving-average smoother. Taring is global and lives in the `Dashboard` control bar (see "Tare" below), not here.
   - `cells_tab.py` — `CellsTab`: holds every `CellTab` in a `QStackedWidget` behind a single "Cell Graphs" tab. It has no in-page selector — the tab header itself is the dropdown (`_CellTabBar` in `dashboard.py` pops a `QMenu` of cell names when that tab is clicked, and the tab label shows the visible cell). Plots are wrapped in rounded card frames with themed axis/grid/legend styling. Readouts are monospace pill cards with a left color-accent bar.
   - `sessions_tab.py` — `SessionsTab`: paginated table of recording sessions with inline CSV viewer (see "Sessions tab" below). Tables use alternating row colors from theme.
   - `arch_tab.py` — `ArchTab`: dental arch heatmap showing real-time Fz force on a parabolic lower-arch layout (see "Arch View tab" below). Text and outlines use theme tokens; the functional heatmap palette (gray→green→yellow→red) is independent.
@@ -118,7 +118,56 @@ Resolved by `graphDash/paths.py`:
 
 The `tooth` field (optional) maps a sensor to a specific tooth in the lower dental arch using Universal numbering (17–32). This drives the Arch View heatmap tab.
 
-The `tooth_type` field (optional) assigns a tooth category — `central_incisor`, `premolar`, or `molar` — which determines the default position vector `r = [rx, ry, rz]` (chiefly the default `rz`) used for force/moment override computations. When present, the sampler applies `compute_adjusted()` from `force_moment.py` to each (post-tare) sample before storing/logging.
+The `tooth_type` field assigns a tooth category — `central_incisor`, `premolar`, or `molar` — which determines the default position vector `r = [rx, ry, rz]` (chiefly the default `rz`) used for force/moment override computations. It is schema-optional, but **a cell without one gets no compensation at all** (see "Sample pipeline"), so in practice every cell on the rig should have it set.
+
+### Sample pipeline
+
+Every sample follows exactly one chain, in `Sampler.run()`:
+
+```
+raw (protocol.py)  ->  - TareOffsets.get(cell)  ->  compute_adjusted(tared, tooth_type, pos_vectors)
+                                                             |
+                                          one `readings` list, shared by:
+                                          DataStore.append()  ->  Cell Graphs / Arch View
+                                          CSVLogger.log_sample()  ->  log_<ts>.csv
+```
+
+`store.append()` and `csv_logger.log_sample()` are handed the **same** `readings` objects, so
+the values written to CSV are byte-for-byte the values the graph plots. The manual log goes
+through the same data: `Dashboard._log_manual_point()` reads the last sample back out of
+`DataStore`, so `manual_log_<ts>.csv` is consistent with both.
+
+Two things that are deliberately *not* part of the stored/logged value:
+
+- **Smoothing.** The `SMOOTHING` spinbox applies `CellTab._moving_avg()` at draw time only.
+  With smoothing > 1 the drawn curve is a filtered view of the stored samples; the CSV always
+  holds the unsmoothed values. Leave it at 1 if you need the plot to match the file exactly.
+- **`_last_raw`.** `Sampler` keeps the pre-tare, pre-compensation reading purely so tare can
+  snapshot it. It is never stored or logged.
+
+`compute_adjusted()` runs **only for cells that declare a `tooth_type`** in `sensors.yaml`.
+A cell without one falls through to tared raw readings — for both the graph and the CSV. That
+skip used to be silent; `__main__.py` now prints a startup warning naming the cells missing a
+`tooth_type`, and `Dashboard._on_config_changed()` flashes the same warning when a live config
+edit leaves one unset.
+
+### Tare
+
+Taring is **global**: one press zeroes every cell at once. `Dashboard._tare_all()` calls
+`Sampler.get_all_last_raw()`, which returns every cell's most recent raw reading under a
+single `_last_raw_lock` acquisition — so all cells are zeroed against the *same* sampler
+cycle — and hands that snapshot to `TareOffsets.set_all()`. Offsets stay **per-cell** (each
+cell subtracts its own bias); it's the tare *action* that is global. `Clear Tare` calls
+`TareOffsets.clear_all()`.
+
+`Tare All` / `Clear Tare` live in the `Dashboard` control bar. `CellTab` has no tare buttons —
+it only renders `offset_label`, a read-only display of the visible cell's offset, which
+`Dashboard._refresh_offset_labels()` updates on every `CellTab` after a tare or clear.
+
+`Sampler.run()` only fills `_last_raw` while `sampler.running` is True (i.e. while recording),
+so taring before the first Start Recording is a no-op that flashes a hint via
+`Dashboard._flash()` — the shared transient-message helper the manual-log confirmation also
+uses.
 
 ### Force/moment overrides
 
@@ -148,7 +197,7 @@ The `FORCE_THRESHOLD` is `0.3 N`.
 
 ### Dashboard tabs
 
-- **Cell Graphs** (one tab, one load cell shown at a time — click the tab header to pop a dropdown of cells): force/moment time-series plots (PyQtGraph), live readout labels, tare/clear-tare controls, causal moving-average smoother (`_moving_avg`, no lookahead). Plots show the adjusted (overridden) force/moment values when a cell has a `tooth_type` configured. Force axis is in **N**, moment axis is in **N·mm** (see "Force/moment overrides" for the unit chain).
+- **Cell Graphs** (one tab, one load cell shown at a time — click the tab header to pop a dropdown of cells): force/moment time-series plots (PyQtGraph), live readout labels, a read-only tare-offset line, causal moving-average smoother (`_moving_avg`, no lookahead). Plots show the adjusted (overridden) force/moment values when a cell has a `tooth_type` configured. Force axis is in **N**, moment axis is in **N·mm** (see "Force/moment overrides" for the unit chain).
 - **Arch View** (`ArchTab`): lower dental arch (teeth 17–32) rendered via `QPainter` on a parabolic curve. Teeth are drawn with type-specific shapes (rounded rects for molars/premolars/incisors, pentagons for canines) and cusp hints (small circles). Mapped teeth are filled with a Fz-based heatmap color; unmapped teeth have dashed outlines and no fill. Color scale: gray ≤ 0.5 N, green→yellow at 0.5→1.25 N, yellow→red at 1.25→2.0 N, capped red above. Includes a gradient color bar legend. Refreshes every `REFRESH_MS` (50 ms).
 - **Position Vector** (`PositionVectorTab`): per-tooth-type position vector editor. Dropdown selects tooth type (central incisor, premolar, molar); editable fields for `rx`, `ry`, and `rz` (all mm). Changing the tooth type loads that type's current values. Edits take effect immediately on the next sample cycle. A "Reset to Defaults" button restores the selected type's factory values.
 - **Sessions** (`SessionsTab`): paginated table (20 rows/page) of all recording sessions from the SQLite database. In-progress sessions show "— recording —" in red. Clicking a file path opens an inline CSV viewer (first 500 rows). Auto-refreshes every 2 seconds. Missing files show an error message instead of crashing.

@@ -34,6 +34,13 @@ class Sampler(threading.Thread):
             r = self._last_raw.get(cell_idx)
             return list(r) if r is not None else [0.0] * N_AXES
 
+    def get_all_last_raw(self):
+        """Snapshot of every cell's most recent raw reading, pre-tare,
+        pre-compensation. Taken under one lock acquisition, so all entries
+        come from the same sampler cycle."""
+        with self._last_raw_lock:
+            return {ci: list(r) for ci, r in self._last_raw.items()}
+
     def run(self):
         while not self._stop:
             if not self.running:

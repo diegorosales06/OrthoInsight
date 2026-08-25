@@ -4,11 +4,14 @@ sensors:
   dev: 0
   csb_gpio: 0
   tooth: 3
+  tooth_type: central_incisor
 - name: premolar
   bus: 0
   dev: 0
   csb_gpio: 0
+  tooth_type: premolar
 - name: molar
   bus: 0
   dev: 0
   csb_gpio: 0
+  tooth_type: molar

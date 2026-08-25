@@ -100,26 +100,26 @@ class DummySensor:
     def read_all(self):
         t = time.time() - self.start_time
         values = []
-        # for axis in range(N_AXES):
-        #     base = np.sin(2 * np.pi * self.frequency * t + self.phase + axis * 0.5)
-        #     noise = 0.02 * np.sin(2 * np.pi * (self.frequency * 3) * t + axis)
-        #     values.append(float(self.amplitude * (base + noise)))
+        for axis in range(N_AXES):
+            base = np.sin(2 * np.pi * self.frequency * t + self.phase + axis * 0.5)
+            noise = 0.02 * np.sin(2 * np.pi * (self.frequency * 3) * t + axis)
+            values.append(float(self.amplitude * (base + noise)))
 
 
-        vals = {
-            "Fx": -0.005,
-            "Fy": 0.003,
-            "Fz": -0.778,
-            "Mx": -0.00886,
-            "My": -0.00116,
-            "Mz": -0.00008,
-        }
-        values.append(vals["Fx"]) # Fx
-        values.append(vals["Fy"]) # Fy
-        values.append(vals["Fz"]) # Fz
-        values.append(vals["Mx"]) # Mx
-        values.append(vals["My"]) # My
-        values.append(vals["Mz"]) # Mz
+        # vals = {
+        #     "Fx": -0.005,
+        #     "Fy": 0.003,
+        #     "Fz": -0.778,
+        #     "Mx": -0.00886,
+        #     "My": -0.00116,
+        #     "Mz": -0.00008,
+        # }
+        # values.append(vals["Fx"]) # Fx
+        # values.append(vals["Fy"]) # Fy
+        # values.append(vals["Fz"]) # Fz
+        # values.append(vals["Mx"]) # Mx
+        # values.append(vals["My"]) # My
+        # values.append(vals["Mz"]) # Mz
         
         return values
 
