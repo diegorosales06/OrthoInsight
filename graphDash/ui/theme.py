@@ -42,6 +42,12 @@ FONT_READOUT     = 13
 FONT_SECTION     = 14
 FONT_TITLE       = 18
 
+# ---- arch-view vector glyphs ----
+# Per-axis arrow colors are reused from constants.FORCE_COLORS / MOMENT_COLORS
+# so the arch glyphs match the time-series curves; only the tooth fill is a
+# chrome-level token.
+TOOTH_FILL       = SURFACE_ALT
+
 # ---- pyqtgraph plot theming ----
 PLOT_BG          = SURFACE
 PLOT_FG          = ON_SURFACE

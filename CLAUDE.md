@@ -57,7 +57,7 @@ The `graphDash/` package is the main codebase, with `graphDash.py` at the repo r
   - `cell_tab.py` — `CellTab`: one page per load cell with force plot, moment plot, live readouts, a read-only tare-offset line, and a causal moving-average smoother. Taring is global and lives in the `Dashboard` control bar (see "Tare" below), not here.
   - `cells_tab.py` — `CellsTab`: holds every `CellTab` in a `QStackedWidget` behind a single "Cell Graphs" tab. It has no in-page selector — the tab header itself is the dropdown (`_CellTabBar` in `dashboard.py` pops a `QMenu` of cell names when that tab is clicked, and the tab label shows the visible cell). Plots are wrapped in rounded card frames with themed axis/grid/legend styling. Readouts are monospace pill cards with a left color-accent bar.
   - `sessions_tab.py` — `SessionsTab`: paginated table of recording sessions with inline CSV viewer (see "Sessions tab" below). Tables use alternating row colors from theme.
-  - `arch_tab.py` — `ArchTab`: dental arch heatmap showing real-time Fz force on a parabolic lower-arch layout (see "Arch View tab" below). Text and outlines use theme tokens; the functional heatmap palette (gray→green→yellow→red) is independent.
+  - `arch_tab.py` — `ArchTab`: dental arch showing real-time force/moment **vector glyphs** on a parabolic lower-arch layout (see "Arch View tab" below). Text, outlines, and the tooth fill use theme tokens; the per-axis arrow colors come from `constants.FORCE_COLORS` / `MOMENT_COLORS`, the same palette the time-series plots use.
   - `position_vector_tab.py` — `PositionVectorTab`: per-tooth-type position vector editor for force/moment override parameters (see "Position Vector tab" below).
   - `sensor_config_editor.py` — `SensorConfigEditor`: the shared editable sensor-config table widget (add/remove rows, field validation, optional per-row status column). Consumed by both `startup_config.py` and `sensor_config_tab.py`.
   - `sensor_config_tab.py` — `SensorConfigTab`: thin in-app tab wrapping `SensorConfigEditor`; saves to `sensors.yaml` on change and shows a restart-needed hint when the cell count changes.
@@ -122,7 +122,7 @@ Resolved by `graphDash/paths.py`:
 
 Note: the current `sensors.yaml` has all cells on the same `bus`/`dev`/`csb_gpio`, so they cannot be addressed individually — surface that to the user rather than silently rewiring, per the "confirm with the user" note above.
 
-The `tooth` field (optional) maps a sensor to a specific tooth in the lower dental arch using Universal numbering (17–32). This drives the Arch View heatmap tab.
+The `tooth` field (optional) maps a sensor to a specific tooth in the lower dental arch using Universal numbering (17–32). This drives the Arch View tab. A cell with no `tooth`, or a `tooth` outside 17–32, simply never appears on the arch — that tooth stays a dashed outline.
 
 The `tooth_type` field assigns a tooth category — `central_incisor`, `premolar`, or `molar` — which determines the default position vector `r = [rx, ry, rz]` (chiefly the default `rz`) used for force/moment override computations. It is schema-optional, but **a cell without one gets no compensation at all** (see "Sample pipeline"), so in practice every cell on the rig should have it set.
 
@@ -206,7 +206,19 @@ The `FORCE_THRESHOLD` is `0.3 N`.
 ### Dashboard tabs
 
 - **Cell Graphs** (one tab, one load cell shown at a time — click the tab header to pop a dropdown of cells): force/moment time-series plots (PyQtGraph), live readout labels, a read-only tare-offset line, causal moving-average smoother (`_moving_avg`, no lookahead). Plots show the adjusted (overridden) force/moment values when a cell has a `tooth_type` configured. Force axis is in **N**, moment axis is in **N·mm** (see "Force/moment overrides" for the unit chain).
-- **Arch View** (`ArchTab`): lower dental arch (teeth 17–32) rendered via `QPainter` on a parabolic curve. Teeth are drawn with type-specific shapes (rounded rects for molars/premolars/incisors, pentagons for canines) and cusp hints (small circles). Mapped teeth are filled with a Fz-based heatmap color; unmapped teeth have dashed outlines and no fill. Color scale: gray ≤ 0.5 N, green→yellow at 0.5→1.25 N, yellow→red at 1.25→2.0 N, capped red above. Includes a gradient color bar legend. Refreshes every `REFRESH_MS` (50 ms).
+- **Arch View** (`ArchTab`): two side-by-side lower dental arches (teeth 17–32) rendered via `QPainter` on a parabolic curve — the left pane carries the **force** components (Fx, Fy, Fz), the right the **moment** components (Mx, My, Mz). Teeth are drawn with type-specific shapes (rounded rects for molars/premolars, rounded pentagons for canines/incisors). Mapped teeth get a light neutral fill (`theme.TOOTH_FILL`); unmapped teeth stay dashed outlines with no fill. Palmer labels sit **buccal** (outside the arch curve) so they stay clear of the glyphs — the anterior teeth converge lingually, so inward labels would pile up. Refreshes every `REFRESH_MS` (50 ms), skipped while the tab is hidden.
+
+  Each mapped tooth is annotated with a **vector glyph** centered on the tooth, drawn in **screen-fixed** orientation (*not* rotated with the arch tangent):
+
+  | Component | Encoding |
+  |---|---|
+  | x | arrow at 45°: **positive → bottom-left**, negative → top-right |
+  | y | horizontal arrow: **positive → right**, negative → left |
+  | z | ring marker: **positive → filled dot** (out of the tooth), negative → **✗** (into the tooth) |
+
+  Arrow length (and pen width) grows linearly with magnitude between the low and high thresholds; the z dot radius / cross weight does the same. Thresholds are per-pane, held in `GlyphScale`: **force 0.25 N → 3 N**, **moment 0.05 N·mm → 75 N·mm**. Below the low threshold **that axis draws nothing** (per-axis, not per-tooth — a tooth can show a y arrow and no x arrow); at or above the high threshold the glyph clamps and stops growing. All glyph sizes are multiples of the arch's base `unit`, so they scale with the pane; the glyph pass is clipped to the arch column so a full-scale arrow can't spill into the key. A fixed-width key column on the right documents the direction convention, the length scale, and the z markers.
+
+  The paint order is two passes — every tooth body + label first, then every glyph — so a later tooth can never paint over an earlier tooth's arrows.
 - **Position Vector** (`PositionVectorTab`): per-tooth-type position vector editor. Dropdown selects tooth type (central incisor, premolar, molar); editable fields for `rx`, `ry`, and `rz` (all mm). Changing the tooth type loads that type's current values. Edits take effect immediately on the next sample cycle. A "Reset to Defaults" button restores the selected type's factory values.
 - **Sessions** (`SessionsTab`): paginated table (20 rows/page) of all recording sessions from the SQLite database. In-progress sessions show "— recording —" in red. Clicking a file path opens an inline CSV viewer (first 500 rows). Auto-refreshes every 2 seconds. Missing files show an error message instead of crashing.
 

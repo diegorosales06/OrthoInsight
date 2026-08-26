@@ -29,6 +29,17 @@ class DataStore:
                 for ai, v in enumerate(vals):
                     self.data[ci][ai].append(v)
 
+    def latest(self, cell_idx):
+        """Most recent 6-axis reading for one cell, or None if no samples yet.
+
+        Cheap alternative to get_cell() for callers that only need the newest
+        sample -- the arch view polls this once per tooth per frame, where
+        get_cell()'s full-buffer numpy copy would be pure waste."""
+        with self.lock:
+            if len(self.t) == 0:
+                return None
+            return [self.data[cell_idx][ai][-1] for ai in range(N_AXES)]
+
     def get_cell(self, cell_idx, window_s=None):
         with self.lock:
             if len(self.t) == 0:

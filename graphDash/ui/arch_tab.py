@@ -1,14 +1,14 @@
 import math
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Optional
 
 from PyQt6.QtWidgets import QWidget, QHBoxLayout
 from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
 from PyQt6.QtGui import (
-    QPainter, QPen, QBrush, QColor, QPainterPath, QFont, QLinearGradient,
+    QPainter, QPen, QBrush, QColor, QPainterPath, QFont, QPolygonF,
 )
 
-from graphDash.constants import REFRESH_MS
+from graphDash.constants import REFRESH_MS, FORCE_COLORS, MOMENT_COLORS
 from graphDash.ui import theme
 
 
@@ -52,57 +52,110 @@ TYPE_SIZE = {
 # Small gap between adjacent teeth along the arc, as a fraction of unit.
 TOOTH_GAP_FRAC = 0.04
 
-COLOR_GRAY  = QColor(180, 180, 180)
-COLOR_GREEN = QColor(30, 200, 30)
-COLOR_YELLOW = QColor(255, 255, 30)
-COLOR_RED   = QColor(220, 30, 30)
-
 
 @dataclass(frozen=True)
-class HeatmapScale:
-    """Configures the gray→green→yellow→red heatmap for one arch view."""
-    gray_threshold: float
-    red_cap: float
-    unit_label: str            # e.g. "Fz (N)" or "|M| (N·mm)"
-    tick_values: tuple         # values to label on the color bar
+class GlyphScale:
+    """Maps one triple of readings (x, y, z) onto a vector glyph.
 
-    @property
-    def mid(self):
-        return (self.gray_threshold + self.red_cap) / 2
+    Magnitudes below `lo` draw nothing for that axis; magnitudes at or above
+    `hi` are clamped to the largest arrow / heaviest z marker.
+    """
+    lo: float          # N or N*mm
+    hi: float          # N or N*mm
+    unit_label: str    # e.g. "Force (N)"
+    idx: tuple         # (x, y, z) indices into a 6-axis reading
+    colors: tuple      # per-axis hex colors, same order as idx
 
 
-FORCE_SCALE = HeatmapScale(
-    gray_threshold=0.5,
-    red_cap=2.0,
-    unit_label="Fz (N)",
-    tick_values=(0.0, 0.5, 1.25, 2.0),
+# Reading order is constants.ALL_AXES = (Fx, Fy, Fz, Mx, My, Mz).
+FORCE_GLYPH = GlyphScale(
+    lo=0.25, hi=3.0, unit_label="Force (N)",
+    idx=(0, 1, 2), colors=FORCE_COLORS,
 )
 
-MOMENT_SCALE = HeatmapScale(
-    gray_threshold=5.0,
-    red_cap=30.0,
-    unit_label="|M| (N·mm)",
-    tick_values=(0.0, 5.0, 17.5, 30.0),
+MOMENT_GLYPH = GlyphScale(
+    lo=0.05, hi=75.0, unit_label="Moment (N·mm)",
+    idx=(3, 4, 5), colors=MOMENT_COLORS,
 )
 
 
-def heatmap_color(value: float, scale: HeatmapScale) -> QColor:
-    if value <= scale.gray_threshold:
-        return COLOR_GRAY
-    if value >= scale.red_cap:
-        return COLOR_RED
-    mid = scale.mid
-    if value <= mid:
-        t = (value - scale.gray_threshold) / (mid - scale.gray_threshold)
-        a, b = COLOR_GREEN, COLOR_YELLOW
+# ---- glyph geometry (multiples of the arch's base `unit`, so glyphs scale
+# with the pane; pen widths are in px) ----
+ARROW_MIN_LEN = 0.55
+ARROW_MAX_LEN = 1.40
+ARROW_HEAD    = 0.20
+ARROW_MIN_W   = 1.2
+ARROW_MAX_W   = 2.8
+Z_RING_R      = 0.22
+Z_DOT_MIN_R   = 0.04
+Z_DOT_MAX_R   = 0.15
+
+# Screen-space directions (+y is down in Qt's coordinate system).
+_K = 0.7071067811865476
+DIR_X_POS = (-_K,  _K)   # +x -> bottom-left
+DIR_X_NEG = ( _K, -_K)   # -x -> top-right
+DIR_Y_POS = ( 1.0, 0.0)  # +y -> right
+DIR_Y_NEG = (-1.0, 0.0)  # -y -> left
+
+# Fixed pixel sizes for the key column (independent of the arch's `unit`).
+KEY_W = 132
+
+
+def _lerp(a, b, t):
+    return a + (b - a) * t
+
+
+def _frac(value, scale: GlyphScale) -> Optional[float]:
+    """Position of |value| within [lo, hi] as 0.0-1.0, or None if below lo."""
+    m = abs(value)
+    if m < scale.lo:
+        return None
+    if m >= scale.hi:
+        return 1.0
+    return (m - scale.lo) / (scale.hi - scale.lo)
+
+
+def _draw_arrow(p, ox, oy, dx, dy, length, head, color, width, inset=0.0):
+    """Arrow from (ox, oy) along the unit vector (dx, dy), with a filled head.
+
+    `inset` pushes the tail forward (used to start at the z ring's edge) without
+    changing the tip, so length stays a faithful read of magnitude."""
+    sx, sy = ox + dx * inset, oy + dy * inset
+    shaft = max(length - head * 0.85, inset)
+    bx, by = ox + dx * shaft, oy + dy * shaft
+    tip = QPointF(ox + dx * length, oy + dy * length)
+
+    pen = QPen(color, width)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawLine(QPointF(sx, sy), QPointF(bx, by))
+
+    px, py = -dy, dx  # perpendicular to the shaft
+    half = head * 0.42
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(color))
+    p.drawPolygon(QPolygonF([
+        tip,
+        QPointF(bx + px * half, by + py * half),
+        QPointF(bx - px * half, by - py * half),
+    ]))
+
+
+def _draw_z_marker(p, ox, oy, ring_r, dot_r, width, positive, color):
+    """Ring with a dot (+z, out of the tooth) or a cross (-z, into the tooth)."""
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.setPen(QPen(color, width))
+    p.drawEllipse(QPointF(ox, oy), ring_r, ring_r)
+    if positive:
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(color))
+        p.drawEllipse(QPointF(ox, oy), dot_r, dot_r)
     else:
-        t = (value - mid) / (scale.red_cap - mid)
-        a, b = COLOR_YELLOW, COLOR_RED
-    return QColor(
-        int(a.red()   + t * (b.red()   - a.red())),
-        int(a.green() + t * (b.green() - a.green())),
-        int(a.blue()  + t * (b.blue()  - a.blue())),
-    )
+        d = ring_r * 0.66
+        p.drawLine(QPointF(ox - d, oy - d), QPointF(ox + d, oy + d))
+        p.drawLine(QPointF(ox - d, oy + d), QPointF(ox + d, oy - d))
 
 
 def _sample_parabola(half_width: float, a: float, n_samples: int = 220):
@@ -147,48 +200,34 @@ def _pos_at_arc_length(s_target, xs_rel, ys_rel, s_cum, cx, vertex_y, a):
     return x, y, angle_deg
 
 
-def fz_metric(store, cell_idx):
-    t, arrs = store.get_cell(cell_idx)
-    if len(t) == 0:
-        return 0.0
-    return float(arrs[2][-1])
-
-
-def moment_magnitude_metric(store, cell_idx):
-    t, arrs = store.get_cell(cell_idx)
-    if len(t) == 0:
-        return 0.0
-    mx = float(arrs[3][-1])
-    my = float(arrs[4][-1])
-    mz = float(arrs[5][-1])
-    return math.sqrt(mx * mx + my * my + mz * mz)
-
-
 class ArchView(QWidget):
-    """One occlusal arch rendered as a live heatmap of a per-cell metric."""
+    """One occlusal arch annotating each mapped tooth with a vector glyph.
+
+    Two in-plane arrows carry the x and y components (length = magnitude,
+    heading = sign) and a ring marker carries z: a dot for out of the tooth,
+    a cross for into it. Directions are screen-fixed, not tooth-relative.
+    """
 
     def __init__(
         self,
         store,
         tooth_to_cell: dict,
-        metric_fn: Callable[[object, int], float],
-        scale: HeatmapScale,
+        scale: GlyphScale,
         title: str,
-        subtitle: str = "Occlusal view · outline only = no sensor mapped",
+        subtitle: str = "Occlusal view · dashed outline = no sensor mapped",
     ):
         super().__init__()
         self.store = store
         self.tooth_to_cell = tooth_to_cell
-        self.metric_fn = metric_fn
         self.scale = scale
         self.title = title
         self.subtitle = subtitle
         self.setMinimumSize(340, 420)
 
-    def _value_for(self, cell_idx: Optional[int]) -> Optional[float]:
+    def _reading_for(self, cell_idx: Optional[int]):
         if cell_idx is None or cell_idx >= self.store.n_cells:
             return None
-        return self.metric_fn(self.store, cell_idx)
+        return self.store.latest(cell_idx)
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -197,13 +236,15 @@ class ArchView(QWidget):
 
         p.fillRect(0, 0, w, h, _qcolor(theme.SURFACE))
 
-        bar_area_w = 90
-        arch_area_w = w - bar_area_w
+        arch_area_w = w - KEY_W
         arch_area_h = h
 
         top_pad = 60
         bottom_pad = 24
-        side_pad = 24
+        # Wide enough for the terminal molars' buccal labels, which sit a full
+        # tooth-height outboard of the arch curve — but proportional, so a
+        # narrow pane doesn't spend most of its width on padding.
+        side_pad = max(18, min(56, arch_area_w * 0.10))
         # Overall size scale for the arch — shrink to leave breathing room.
         ARCH_SCALE = 0.95
         avail_w = max(80, arch_area_w - 2 * side_pad)
@@ -245,7 +286,9 @@ class ArchView(QWidget):
         max_h_factor = max(v[1] for v in TYPE_SIZE.values())
         unit = min(unit, avail_h / (max_h_factor * 1.6))
 
-        # Place each tooth at its cumulative arc-length center.
+        # Place each tooth at its cumulative arc-length center, pulling its
+        # reading once per frame.
+        placements = []
         cursor = 0.0
         for tooth_num in LOWER_ARCH_ORDER:
             ttype = TOOTH_TYPE[tooth_num]
@@ -255,29 +298,39 @@ class ArchView(QWidget):
             x, y, angle_deg = _pos_at_arc_length(
                 s_target, xs_rel, ys_rel, s_cum, cx, vertex_y, a
             )
-
-            cell_idx = self.tooth_to_cell.get(tooth_num)
-            value = self._value_for(cell_idx)
-            fill = heatmap_color(value, self.scale) if value is not None else None
-            self._draw_tooth(p, tooth_num, x, y, angle_deg, unit, fill)
-
+            vals = self._reading_for(self.tooth_to_cell.get(tooth_num))
+            placements.append((tooth_num, x, y, angle_deg, vals))
             cursor += tw + TOOTH_GAP_FRAC * unit
 
-        self._draw_legend(p, arch_area_w, 0, bar_area_w, h)
+        # Two passes: every tooth body first, then every glyph, so a later
+        # tooth can never paint over an earlier tooth's arrows.
+        for tooth_num, x, y, angle_deg, vals in placements:
+            self._draw_tooth(p, tooth_num, x, y, angle_deg, unit, vals is not None)
+        p.save()
+        p.setClipRect(QRectF(0, top_pad - 8, arch_area_w, h - top_pad + 8))
+        for tooth_num, x, y, angle_deg, vals in placements:
+            if vals is not None:
+                self._draw_glyph(p, x, y, unit, vals)
+        p.restore()
 
+        self._draw_key(p, arch_area_w, 0, KEY_W, h)
+
+        text_w = max(40, arch_area_w - 30)
         title_font = QFont(); title_font.setPointSize(theme.FONT_SECTION); title_font.setBold(True)
         p.setFont(title_font)
         p.setPen(_qcolor(theme.ON_SURFACE))
-        p.drawText(18, 26, self.title)
+        p.drawText(18, 26, p.fontMetrics().elidedText(
+            self.title, Qt.TextElideMode.ElideRight, int(text_w)))
 
         sub_font = QFont(); sub_font.setPointSize(theme.FONT_BODY)
         p.setFont(sub_font)
         p.setPen(_qcolor(theme.ON_SURFACE_MUTED))
-        p.drawText(18, 44, self.subtitle)
+        p.drawText(18, 44, p.fontMetrics().elidedText(
+            self.subtitle, Qt.TextElideMode.ElideRight, int(text_w)))
 
         p.end()
 
-    def _draw_tooth(self, p, tooth_num, cx, cy, angle_deg, unit, fill):
+    def _draw_tooth(self, p, tooth_num, cx, cy, angle_deg, unit, mapped):
         ttype = TOOTH_TYPE[tooth_num]
         w_factor, h_factor = TYPE_SIZE[ttype]
         tw = unit * w_factor
@@ -288,27 +341,64 @@ class ArchView(QWidget):
         p.rotate(angle_deg)
 
         path = self._tooth_path(ttype, tw, th)
-        if fill is not None:
-            p.setBrush(QBrush(fill))
-            p.setPen(QPen(_qcolor(theme.ON_SURFACE), 1.5))
+        if mapped:
+            p.setBrush(QBrush(_qcolor(theme.TOOTH_FILL)))
+            p.setPen(QPen(_qcolor(theme.OUTLINE_STRONG), 1.5))
         else:
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.setPen(QPen(_qcolor(theme.OUTLINE_STRONG), 1.2, Qt.PenStyle.DashLine))
         p.drawPath(path)
 
-        p.restore()
-
+        # Label sits buccal (local +y, outside the arch) so it stays clear of the
+        # glyph at the tooth center; the anterior teeth converge lingually, so
+        # outward labels fan apart instead of piling up. Counter-rotate to keep
+        # the text upright.
+        p.translate(0, th * 0.75 + unit * 0.36)
+        p.rotate(-angle_deg)
         label_font = QFont()
         label_font.setPointSize(max(7, int(unit * 0.28)))
         label_font.setBold(True)
         p.setFont(label_font)
-        p.setPen(_qcolor(theme.ON_SURFACE))
+        p.setPen(_qcolor(theme.ON_SURFACE_MUTED))
         text = PALMER_LABEL.get(tooth_num, str(tooth_num))
         fm = p.fontMetrics()
-        p.drawText(
-            QPointF(cx - fm.horizontalAdvance(text) / 2, cy + fm.height() / 3),
-            text,
-        )
+        p.drawText(QPointF(-fm.horizontalAdvance(text) / 2, fm.height() / 3), text)
+
+        p.restore()
+
+    def _draw_glyph(self, p, cx, cy, unit, vals):
+        """Draw the x/y arrows and the z marker for one tooth, screen-aligned."""
+        scale = self.scale
+        vx = vals[scale.idx[0]]
+        vy = vals[scale.idx[1]]
+        vz = vals[scale.idx[2]]
+
+        head = unit * ARROW_HEAD
+        ring_r = unit * Z_RING_R
+        for value, pos_dir, neg_dir, color in (
+            (vx, DIR_X_POS, DIR_X_NEG, scale.colors[0]),
+            (vy, DIR_Y_POS, DIR_Y_NEG, scale.colors[1]),
+        ):
+            f = _frac(value, scale)
+            if f is None:
+                continue
+            dx, dy = pos_dir if value >= 0 else neg_dir
+            _draw_arrow(
+                p, cx, cy, dx, dy,
+                unit * _lerp(ARROW_MIN_LEN, ARROW_MAX_LEN, f),
+                head, _qcolor(color), _lerp(ARROW_MIN_W, ARROW_MAX_W, f),
+                inset=ring_r,
+            )
+
+        fz = _frac(vz, scale)
+        if fz is not None:
+            _draw_z_marker(
+                p, cx, cy,
+                ring_r,
+                unit * _lerp(Z_DOT_MIN_R, Z_DOT_MAX_R, fz),
+                _lerp(ARROW_MIN_W, ARROW_MAX_W, fz),
+                vz >= 0, _qcolor(scale.colors[2]),
+            )
 
     def _tooth_path(self, ttype, w, h):
         """Shape a single tooth in its local frame.
@@ -344,65 +434,76 @@ class ArchView(QWidget):
             path.addRoundedRect(QRectF(-hw, -hh, w, h), r, r)
         return path
 
-    # ---- color bar legend ----
+    # ---- glyph key ----
 
-    def _draw_legend(self, p, x, y, w, h):
-        margin = 20
-        bar_x = x + 12
-        bar_w = 20
-        bar_y = y + 40
-        bar_h = h - 2 * margin - 20
+    def _draw_key(self, p, x, y, w, h):
+        scale = self.scale
+        left = x + 12
+        cur = y + 26
 
-        grad = QLinearGradient(0, bar_y, 0, bar_y + bar_h)
-        # 75% top region = green→yellow→red (gray_threshold..red_cap)
-        # 25% bottom band = gray (0..gray_threshold)
-        grad.setColorAt(0.0,    COLOR_RED)
-        grad.setColorAt(0.375,  COLOR_YELLOW)
-        grad.setColorAt(0.75,   COLOR_GREEN)
-        grad.setColorAt(0.7501, COLOR_GRAY)
-        grad.setColorAt(1.0,    COLOR_GRAY)
+        heading = QFont(); heading.setPointSize(theme.FONT_BODY); heading.setBold(True)
+        caption = QFont(); caption.setPointSize(theme.FONT_CAPTION)
+        note = QFont(); note.setPointSize(theme.FONT_CAPTION); note.setItalic(True)
+        fg = _qcolor(theme.ON_SURFACE)
+        muted = _qcolor(theme.ON_SURFACE_MUTED)
 
-        p.setPen(QPen(_qcolor(theme.OUTLINE_STRONG), 1))
-        p.setBrush(QBrush(grad))
-        p.drawRect(int(bar_x), int(bar_y), bar_w, int(bar_h))
+        p.setFont(heading)
+        p.setPen(fg)
+        p.drawText(int(left), int(cur), scale.unit_label)
+        cur += 26
 
-        font = QFont(); font.setPointSize(theme.FONT_CAPTION)
-        title_font = QFont(); title_font.setPointSize(theme.FONT_BODY); title_font.setBold(True)
-        p.setFont(title_font)
-        p.setPen(_qcolor(theme.ON_SURFACE))
-        p.drawText(int(x + 8), int(y + 26), self.scale.unit_label)
-        p.setFont(font)
+        # Direction compass — the reference sketch, at fixed pixel size.
+        p.setFont(caption)
+        p.setPen(muted)
+        p.drawText(int(left), int(cur), "Direction")
+        cur += 18
 
-        for value in self.scale.tick_values:
-            ry = self._bar_y_for_value(value, bar_y, bar_h)
-            p.setPen(_qcolor(theme.OUTLINE_STRONG))
-            p.drawLine(int(bar_x + bar_w), int(ry), int(bar_x + bar_w + 6), int(ry))
-            p.setPen(_qcolor(theme.ON_SURFACE))
-            p.drawText(int(bar_x + bar_w + 10), int(ry + 4), f"{value:g}")
+        ox, oy = left + 52, cur + 18
+        _draw_arrow(p, ox, oy, *DIR_X_POS, 30, 8, _qcolor(scale.colors[0]), 1.6, inset=7)
+        _draw_arrow(p, ox, oy, *DIR_Y_POS, 34, 8, _qcolor(scale.colors[1]), 1.6, inset=7)
+        _draw_z_marker(p, ox, oy, 7, 2.5, 1.6, True, _qcolor(scale.colors[2]))
+        p.setPen(fg)
+        p.drawText(int(ox - 44), int(oy + 32), "+x")
+        p.drawText(int(ox + 38), int(oy + 4), "+y")
+        p.drawText(int(ox - 4), int(oy - 12), "z")
+        cur = oy + 48
 
-        thresh_y = self._bar_y_for_value(self.scale.gray_threshold, bar_y, bar_h)
-        note_font = QFont(); note_font.setPointSize(theme.FONT_CAPTION); note_font.setItalic(True)
-        p.setFont(note_font)
-        p.setPen(_qcolor(theme.ON_SURFACE_MUTED))
-        p.drawText(int(bar_x - 2), int(thresh_y + bar_h * 0.15),
-                   f"≤ {self.scale.gray_threshold:g}: gray")
+        p.setPen(muted)
+        p.drawText(int(left), int(cur), "− = opposite")
+        cur += 26
 
-    def _bar_y_for_value(self, value, bar_y, bar_h):
-        gt = self.scale.gray_threshold
-        cap = self.scale.red_cap
-        if value <= 0:
-            frac = 0
-        elif value >= cap:
-            frac = 1
-        elif value <= gt:
-            frac = value / gt * 0.25
-        else:
-            frac = 0.25 + (value - gt) / (cap - gt) * 0.75
-        return bar_y + bar_h - frac * bar_h
+        # Magnitude scale: shortest and longest arrow with their values.
+        p.setPen(muted)
+        p.drawText(int(left), int(cur), "Length")
+        cur += 18
+        for value, plen, width in (
+            (scale.lo, 24, ARROW_MIN_W),
+            (scale.hi, 60, ARROW_MAX_W),
+        ):
+            _draw_arrow(p, left, cur, *DIR_Y_POS, plen, 8, fg, width)
+            p.setPen(fg)
+            p.drawText(int(left), int(cur + 15), f"{value:g}")
+            cur += 34
+
+        cur += 6
+        p.setPen(muted)
+        p.drawText(int(left), int(cur), "z marker")
+        cur += 18
+        for positive, text in ((True, "+z  out"), (False, "−z  in")):
+            _draw_z_marker(p, left + 8, cur, 7, 3.0, 1.8,
+                           positive, _qcolor(scale.colors[2]))
+            p.setPen(fg)
+            p.drawText(int(left + 22), int(cur + 4), text)
+            cur += 24
+
+        cur += 8
+        p.setFont(note)
+        p.setPen(muted)
+        p.drawText(int(left), int(cur), f"< {scale.lo:g} hidden")
 
 
 class ArchTab(QWidget):
-    """Side-by-side force (Fz) and moment (|M|) heatmap arches."""
+    """Side-by-side force and moment arches, each tooth carrying a vector glyph."""
 
     @staticmethod
     def _build_tooth_to_cell(tooth_per_cell):
@@ -422,16 +523,14 @@ class ArchTab(QWidget):
         self.force_view = ArchView(
             store,
             tooth_to_cell,
-            metric_fn=fz_metric,
-            scale=FORCE_SCALE,
-            title="Lower Arch — Fz Heatmap",
+            scale=FORCE_GLYPH,
+            title="Lower Arch — Force Components",
         )
         self.moment_view = ArchView(
             store,
             tooth_to_cell,
-            metric_fn=moment_magnitude_metric,
-            scale=MOMENT_SCALE,
-            title="Lower Arch — |M| Heatmap",
+            scale=MOMENT_GLYPH,
+            title="Lower Arch — Moment Components",
         )
 
         layout = QHBoxLayout(self)
@@ -447,7 +546,7 @@ class ArchTab(QWidget):
     def set_tooth_per_cell(self, tooth_per_cell):
         """Re-map which load cell drives each tooth and push the new mapping
         to both arch views, so a live sensor-config change is reflected in the
-        heatmaps. The views read force/moment values from the DataStore, which
+        glyphs. The views read force/moment values from the DataStore, which
         already holds post-tare, post-compensation readings."""
         self.tooth_per_cell = list(tooth_per_cell or [])
         mapping = self._build_tooth_to_cell(self.tooth_per_cell)
@@ -455,5 +554,7 @@ class ArchTab(QWidget):
         self.moment_view.tooth_to_cell = mapping
 
     def _refresh(self):
+        if not self.isVisible():
+            return
         self.force_view.update()
         self.moment_view.update()
