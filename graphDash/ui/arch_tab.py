@@ -1,126 +1,47 @@
 """3D arch view: one lower arch, three force arrows per instrumented tooth.
 
-The arch is a parabola in the z = 0 (occlusal) plane; each tooth's crown is an
-extruded prism of its occlusal outline. Every tooth that has a load cell mapped
-to it grows three arrows from the middle of its occlusal surface -- one per force
-component, drawn in that tooth's *own* frame:
+`arch_model.py` owns the arch geometry and the reading-to-arrow scale; `proj3d.py`
+owns the camera. This module is the view: it fits the arch to the pane, turns one
+frame's readings into depth-sorted primitives, paints them with QPainter, and
+wires up the camera controls.
 
-    e_x  mesio-distal   (tangent to the arch)
-    e_y  bucco-lingual  (outward normal; +y = buccal/labial)
-    e_z  occlusal       (+z = up, out of the tooth)
+Arrow length is linear in |value| across the scale's [lo, hi]: below `lo` the
+axis draws nothing, at or above `hi` it clamps to the longest arrow. So a longer
+arrow is always more force, and an absent arrow always means "under threshold".
 
-Arrow length is linear in |value| across [lo, hi]: below `lo` the axis draws
-nothing, at or above `hi` it clamps to the longest arrow. So a longer arrow is
-always more force, and an absent arrow always means "under threshold".
-
-Rendering is a software 3D pipeline (`proj3d`) painted with QPainter -- no
-OpenGL, so it behaves the same on the Pi as it does under `--debug` on a
-laptop. Visibility comes from back-face culling plus a painter's-algorithm
-depth sort over teeth and arrows.
+No OpenGL -- the software pipeline behaves the same on the Pi as it does under
+`--debug` on a laptop. Visibility is back-face culling plus a painter's-algorithm
+depth sort over crowns and arrows together.
 """
 
 import math
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
+from functools import partial
 
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel
-from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
-from PyQt6.QtGui import (
-    QPainter, QPen, QBrush, QColor, QPainterPath, QFont, QPolygonF,
+from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF, pyqtSignal
+from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QFont, QPolygonF
+
+from graphDash.constants import REFRESH_MS
+from graphDash.ui import theme
+from graphDash.ui.proj3d import Camera, vdot, vunit, vmad
+from graphDash.ui.arch_model import (
+    build_arch, GlyphScale, FORCE_GLYPH, MOMENT_GLYPH,
+    LOWER_ARCH_ORDER, PALMER_LABEL, TOOTH_TYPE,
 )
 
-from graphDash.constants import REFRESH_MS, FORCE_COLORS, MOMENT_COLORS
-from graphDash.ui import theme
-from graphDash.ui.proj3d import Camera, vcross, vdot, vunit, vmad
+__all__ = ["ArchTab", "ArchView3D", "FORCE_GLYPH", "MOMENT_GLYPH", "PRESETS"]
 
 
 def _qcolor(hex_str):
     return QColor(hex_str)
 
-# Mandibular arch in Universal numbering, ordered left-to-right on screen
-# (patient's right on viewer's left, standard occlusal-view convention).
-LOWER_ARCH_ORDER = [32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17]
 
-TOOTH_TYPE = {
-    17: 'molar',    18: 'molar',    19: 'molar',
-    20: 'premolar', 21: 'premolar',
-    22: 'canine',
-    23: 'incisor',  24: 'incisor',  25: 'incisor',  26: 'incisor',
-    27: 'canine',
-    28: 'premolar', 29: 'premolar',
-    30: 'molar',    31: 'molar',    32: 'molar',
-}
-
-# Display-only Palmer-notation labels (LL# = lower-left quadrant,
-# LR# = lower-right quadrant). Internal load-cell mapping still uses
-# the Universal numbers in TOOTH_TYPE / tooth_to_cell.
-PALMER_LABEL = {
-    17: 'LL8', 18: 'LL7', 19: 'LL6', 20: 'LL5',
-    21: 'LL4', 22: 'LL3', 23: 'LL2', 24: 'LL1',
-    25: 'LR1', 26: 'LR2', 27: 'LR3', 28: 'LR4',
-    29: 'LR5', 30: 'LR6', 31: 'LR7', 32: 'LR8',
-}
-
-# (width_factor, depth_factor) relative to the arch's base unit. Width drives
-# both the drawn crown size AND its footprint along the arc (teeth are placed by
-# cumulative arc length so they sit side-by-side, touching); depth is the
-# bucco-lingual dimension.
-TYPE_SIZE = {
-    'molar':    (1.35, 1.20),
-    'premolar': (0.90, 0.95),
-    'canine':   (0.75, 1.10),
-    'incisor':  (0.60, 0.95),
-}
-
-# Crown height as a fraction of `unit`, per type -- posterior crowns are drawn
-# shorter than anterior ones, as they are clinically.
-TYPE_HEIGHT = {
-    'molar': 0.75, 'premolar': 0.85, 'canine': 1.15, 'incisor': 1.05,
-}
-
-# Small gap between adjacent teeth along the arc, as a fraction of unit.
-TOOTH_GAP_FRAC = 0.04
+def _lerp(a, b, t):
+    return a + (b - a) * t
 
 
-@dataclass(frozen=True)
-class GlyphScale:
-    """Maps one triple of readings (x, y, z) onto three arrows.
-
-    Magnitudes below `lo` draw nothing for that axis; magnitudes at or above
-    `hi` are clamped to the longest arrow.
-    """
-    lo: float          # N or N*mm
-    hi: float          # N or N*mm
-    unit_label: str    # e.g. "Force (N)"
-    idx: tuple         # (x, y, z) indices into a 6-axis reading
-    colors: tuple      # per-axis hex colors, same order as idx
-    names: tuple       # per-axis short names, same order as idx
-
-
-# Reading order is constants.ALL_AXES = (Fx, Fy, Fz, Mx, My, Mz).
-FORCE_GLYPH = GlyphScale(
-    lo=0.25, hi=3.0, unit_label="Force (N)",
-    idx=(0, 1, 2), colors=FORCE_COLORS, names=("Fx", "Fy", "Fz"),
-)
-
-# Kept for the moment layer this view will grow later; nothing draws it yet.
-MOMENT_GLYPH = GlyphScale(
-    lo=0.05, hi=75.0, unit_label="Moment (N·mm)",
-    idx=(3, 4, 5), colors=MOMENT_COLORS, names=("Mx", "My", "Mz"),
-)
-
-
-# ---- arch geometry, in world units (the pane fit is applied at projection
-# time, so nothing here depends on widget size) ----
-ARCH_HALF_WIDTH = 1.0    # x of the terminal molars
-ARCH_DEPTH      = 1.25   # y of the terminal molars; the parabola is y = a*x^2
-OUTLINE_POINTS  = 18     # verts per crown outline after decimation
-# QPainterPath flattens curves with an absolute tolerance, so a crown ~0.2 world
-# units wide would collapse to a handful of verts. Build the outline at a much
-# larger nominal size and scale the flattened points back down.
-FLATTEN_SCALE   = 300.0
-
-# ---- arrow geometry (lengths are multiples of `unit`; widths are px) ----
+# ---- glyph geometry (lengths are multiples of the arch's `unit`; widths px) ----
 ARROW_MIN_LEN  = 0.60
 ARROW_MAX_LEN  = 1.95
 ARROW_HEAD_LEN = 0.30
@@ -135,38 +56,35 @@ ORIGIN_DOT_R   = 0.07
 AXIAL_MIN_FRAC = 0.34
 RING_MIN_R     = 0.16    # multiples of `unit`
 RING_MAX_R     = 0.30
+# Rings mark their own tooth's occlusal surface, so nothing of that tooth may
+# cover them. Primitives paint far-to-near, so the nearest possible depth puts
+# them last.
+OVERLAY_DEPTH  = float("-inf")
 
-# Camera presets: (yaw deg, pitch deg).
+# ---- camera ----
+# Presets: (name, yaw deg, pitch deg).
 PRESETS = (
     ("Oblique",  -18.0, 40.0),
     ("Occlusal",   0.0, 89.5),
     ("Anterior",   0.0,  6.0),
 )
 DEFAULT_PRESET = 0
-CAM_DISTANCE = 4.0
+# The arch spans ~2 x 1.3 world units. Keep the eye well outside that so a near
+# tooth can never approach the camera and blow up under the perspective divide
+# -- the view fits the pane by scaling, so a longer lens costs nothing.
+CAM_DISTANCE = 7.0
 FIT_MARGIN = 0.86        # leaves room for arrows, which are not fitted
 ZOOM_MIN, ZOOM_MAX = 0.45, 4.0
 ORBIT_SENS = 0.008       # rad per pixel of drag
 
-# Fixed pixel width of the painted key column.
-KEY_W = 176
+# ---- chrome ----
+KEY_W = 204              # fixed pixel width of the painted key column
+KEY_ARROW_HEAD = 8.0     # px, for the key's flat sample arrows
+KEY_RING_R = 7.0
+TOP_PAD, BOTTOM_PAD, SIDE_PAD = 58, 22, 18
 
 # Directional light for crown shading, in world coordinates.
 LIGHT_DIR = vunit((0.35, -0.55, 0.78))
-
-
-def _lerp(a, b, t):
-    return a + (b - a) * t
-
-
-def _frac(value, scale: GlyphScale) -> Optional[float]:
-    """Position of |value| within [lo, hi] as 0.0-1.0, or None if below lo."""
-    m = abs(value)
-    if m < scale.lo:
-        return None
-    if m >= scale.hi:
-        return 1.0
-    return (m - scale.lo) / (scale.hi - scale.lo)
 
 
 def _shade(color: QColor, f: float) -> QColor:
@@ -177,168 +95,117 @@ def _shade(color: QColor, f: float) -> QColor:
     )
 
 
-# ---- arch construction ----
+# ---- one frame's worth of projection ----
 
-def _tooth_path(ttype, w, d) -> QPainterPath:
-    """Occlusal outline of one crown in its local frame.
+@dataclass(frozen=True)
+class _Frame:
+    """World -> screen for a single paint pass.
 
-    Local axes: +x along the arch (mesio-distal), +y outward (bucco-labial).
-    Molars/premolars are soft squircles; canines and incisors are rounded
-    pentagons with a subtle cusp on the outer edge.
+    Built once per `paintEvent` by `fit()` and read-only thereafter, so no frame
+    state has to live on the widget.
     """
-    path = QPainterPath()
-    hw, hh = w / 2, d / 2
-    if ttype == 'canine':
-        path.moveTo(-hw * 0.88, -hh * 0.95)
-        path.quadTo(-hw, -hh * 0.85, -hw, -hh * 0.25)
-        path.quadTo(-hw * 0.95, hh * 0.35, -hw * 0.55, hh * 0.75)
-        path.quadTo(0, hh * 1.05, hw * 0.55, hh * 0.75)
-        path.quadTo(hw * 0.95, hh * 0.35, hw, -hh * 0.25)
-        path.quadTo(hw, -hh * 0.85, hw * 0.88, -hh * 0.95)
-        path.quadTo(0, -hh * 1.02, -hw * 0.88, -hh * 0.95)
-        path.closeSubpath()
-    elif ttype == 'incisor':
-        path.moveTo(-hw * 0.85, -hh * 0.9)
-        path.quadTo(-hw, -hh * 0.75, -hw * 0.95, -hh * 0.1)
-        path.quadTo(-hw * 0.85, hh * 0.55, -hw * 0.4, hh * 0.85)
-        path.quadTo(0, hh * 1.02, hw * 0.4, hh * 0.85)
-        path.quadTo(hw * 0.85, hh * 0.55, hw * 0.95, -hh * 0.1)
-        path.quadTo(hw, -hh * 0.75, hw * 0.85, -hh * 0.9)
-        path.quadTo(0, -hh * 1.0, -hw * 0.85, -hh * 0.9)
-        path.closeSubpath()
-    else:
-        # Molar (wider, rounder) or premolar (slightly less rounded).
-        r = min(w, d) * (0.38 if ttype == 'molar' else 0.32)
-        path.addRoundedRect(QRectF(-hw, -hh, w, d), r, r)
-    return path
+    projector: object
+    scale_px: float      # px per image unit
+    cx: float
+    cy: float
+    ppu: float           # px per world unit near the camera target
+    unit: float          # the arch's base unit, in world units
 
-
-def _outline_points(ttype, w, d):
-    """Flatten `_tooth_path` to a decimated list of local (x, y) verts."""
-    k = FLATTEN_SCALE
-    poly = _tooth_path(ttype, w * k, d * k).toFillPolygon()
-    pts = [(pt.x() / k, pt.y() / k) for pt in poly]
-    # toFillPolygon repeats the start point to close the ring.
-    if len(pts) > 1 and abs(pts[0][0] - pts[-1][0]) < 1e-6 \
-            and abs(pts[0][1] - pts[-1][1]) < 1e-6:
-        pts.pop()
-    if len(pts) <= OUTLINE_POINTS:
-        return pts
-    step = len(pts) / OUTLINE_POINTS
-    return [pts[min(len(pts) - 1, int(i * step))] for i in range(OUTLINE_POINTS)]
-
-
-def _parabola_arc(a, half_width, n_samples=241):
-    """Sample y = a*x^2 over [-half_width, half_width], returning
-    (xs, ys, s_cum) with s_cum[i] the arc length from the first sample."""
-    step = 2 * half_width / (n_samples - 1)
-    xs = [-half_width + i * step for i in range(n_samples)]
-    ys = [a * x * x for x in xs]
-    s = [0.0]
-    for i in range(1, n_samples):
-        dx, dy = xs[i] - xs[i - 1], ys[i] - ys[i - 1]
-        s.append(s[-1] + math.hypot(dx, dy))
-    return xs, ys, s
-
-
-def _point_at_arc(s_target, xs, ys, s_cum):
-    """(x, y) at arc length `s_target` along the sampled parabola."""
-    if s_target <= 0:
-        return xs[0], ys[0]
-    if s_target >= s_cum[-1]:
-        return xs[-1], ys[-1]
-    lo, hi = 0, len(s_cum) - 1
-    while lo < hi:
-        mid = (lo + hi) // 2
-        if s_cum[mid] < s_target:
-            lo = mid + 1
-        else:
-            hi = mid
-    span = s_cum[lo] - s_cum[lo - 1]
-    f = (s_target - s_cum[lo - 1]) / span if span > 0 else 0.0
-    return (xs[lo - 1] + f * (xs[lo] - xs[lo - 1]),
-            ys[lo - 1] + f * (ys[lo] - ys[lo - 1]))
-
-
-@dataclass
-class Tooth:
-    """One crown as an extruded prism, plus its local sensor frame."""
-    number: int
-    ttype: str
-    center: tuple            # crown base center, world (z = 0)
-    e_x: tuple               # mesio-distal
-    e_y: tuple               # bucco-lingual, outward
-    e_z: tuple               # occlusal, (0, 0, 1)
-    height: float
-    apex: tuple              # arrow origin: middle of the occlusal surface
-    base: list = field(default_factory=list)     # world ring at z = 0
-    top: list = field(default_factory=list)      # world ring at z = height
-    normals: list = field(default_factory=list)  # outward normal per base edge
-    label_anchor: tuple = (0.0, 0.0, 0.0)
-
-
-def build_arch():
-    """Build every tooth of the lower arch in world coordinates.
-
-    Depends only on the module constants, so it runs once per view rather than
-    once per frame. Teeth are laid out by cumulative arc length, which keeps
-    them touching along the curve regardless of the type mix.
-    """
-    a = ARCH_DEPTH / (ARCH_HALF_WIDTH ** 2)
-    xs, ys, s_cum = _parabola_arc(a, ARCH_HALF_WIDTH)
-    arc_length = s_cum[-1]
-
-    total_w = sum(TYPE_SIZE[TOOTH_TYPE[t]][0] for t in LOWER_ARCH_ORDER)
-    total = total_w + TOOTH_GAP_FRAC * (len(LOWER_ARCH_ORDER) - 1)
-    unit = arc_length / total
-
-    teeth = []
-    cursor = 0.0
-    for number in LOWER_ARCH_ORDER:
-        ttype = TOOTH_TYPE[number]
-        w_factor, d_factor = TYPE_SIZE[ttype]
-        w, d = unit * w_factor, unit * d_factor
-        height = unit * TYPE_HEIGHT[ttype]
-
-        cx, cy = _point_at_arc(cursor + w / 2, xs, ys, s_cum)
-        cursor += w + TOOTH_GAP_FRAC * unit
-
-        # Outward (buccal) normal of y = a*x^2: the interior of the U is the
-        # y > a*x^2 side, so the outward direction is (2ax, -1).
-        e_y = vunit((2 * a * cx, -1.0, 0.0))
-        e_z = (0.0, 0.0, 1.0)
-        e_x = vcross(e_y, e_z)          # right-handed: e_x x e_y = e_z
-        center = (cx, cy, 0.0)
-
-        tooth = Tooth(
-            number=number, ttype=ttype, center=center,
-            e_x=e_x, e_y=e_y, e_z=e_z, height=height,
-            apex=(cx, cy, height),
+    @classmethod
+    def fit(cls, arch, camera, zoom, rect: QRectF):
+        """Fit the arch's crowns into `rect` at the camera's current pose."""
+        pr = camera.projector()
+        us, vs = [], []
+        for pt in arch.vertices():
+            u, v, _ = pr.project(pt)
+            us.append(u)
+            vs.append(v)
+        span_u = max(1e-6, max(us) - min(us))
+        span_v = max(1e-6, max(vs) - min(vs))
+        s = min(rect.width() / span_u, rect.height() / span_v) * FIT_MARGIN * zoom
+        # `s` is px per *image* unit and image coordinates are already divided by
+        # depth, so the world-unit scale carries the camera distance back in.
+        return cls(
+            projector=pr, scale_px=s,
+            cx=rect.center().x() - s * (min(us) + max(us)) / 2,
+            cy=rect.center().y() + s * (min(vs) + max(vs)) / 2,
+            ppu=s / max(1e-6, camera.distance),
+            unit=arch.unit,
         )
-        for lx, ly in _outline_points(ttype, w, d):
-            base_pt = vmad(vmad(center, e_x, lx), e_y, ly)
-            tooth.base.append(base_pt)
-            tooth.top.append((base_pt[0], base_pt[1], height))
 
-        n = len(tooth.base)
-        for i in range(n):
-            p0, p1 = tooth.base[i], tooth.base[(i + 1) % n]
-            edge = (p1[0] - p0[0], p1[1] - p0[1], 0.0)
-            nrm = vunit(vcross(edge, e_z))
-            mid = ((p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2, 0.0)
-            out = (mid[0] - center[0], mid[1] - center[1], 0.0)
-            if vdot(nrm, out) < 0:      # orient outward regardless of winding
-                nrm = (-nrm[0], -nrm[1], -nrm[2])
-            tooth.normals.append(nrm)
+    def place(self, world):
+        """(screen point, depth) for one world point."""
+        u, v, depth = self.projector.project(world)
+        return QPointF(self.cx + self.scale_px * u,
+                       self.cy - self.scale_px * v), depth
 
-        tooth.label_anchor = vmad(center, e_y, d * 0.5 + unit * 0.45)
-        teeth.append(tooth)
+    def point(self, world) -> QPointF:
+        return self.place(world)[0]
 
-    return teeth, unit
+    def depth(self, world) -> float:
+        return self.place(world)[1]
+
+    def hidden(self, normal) -> bool:
+        """True when a face with this outward normal points away from the eye."""
+        return vdot(normal, self.projector.fwd) >= 0
+
+    def toward_viewer(self, direction) -> bool:
+        return vdot(direction, self.projector.fwd) < 0
+
+
+# ---- screen-space painting primitives (shared by the arch and its key) ----
+
+def _paint_arrow(p, tail: QPointF, neck: QPointF, tip: QPointF, color, width):
+    """Shaft from `tail` to `neck`, plus a head filling `neck` -> `tip`.
+
+    Screen space only: the arch's 3D arrows project their three points first,
+    the key's flat sample arrows construct them directly.
+    """
+    pen = QPen(color, width)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawLine(tail, neck)
+
+    dx, dy = tip.x() - neck.x(), tip.y() - neck.y()
+    seg = math.hypot(dx, dy)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(color))
+    if seg < 0.75:
+        p.drawEllipse(tip, width * 1.3, width * 1.3)
+        return
+    px, py = -dy / seg, dx / seg
+    half = seg * 0.42
+    p.drawPolygon(QPolygonF([
+        tip,
+        QPointF(neck.x() + px * half, neck.y() + py * half),
+        QPointF(neck.x() - px * half, neck.y() - py * half),
+    ]))
+
+
+def _paint_ring(p, center: QPointF, r, color, width, toward):
+    """Ring marking an axis aimed along the view: filled dot = toward the viewer
+    (out of the screen), cross = away from it."""
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.setPen(QPen(color, width))
+    p.drawEllipse(center, r, r)
+    if toward:
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(color))
+        p.drawEllipse(center, r * 0.45, r * 0.45)
+    else:
+        d = r * 0.62
+        p.drawLine(QPointF(center.x() - d, center.y() - d),
+                   QPointF(center.x() + d, center.y() + d))
+        p.drawLine(QPointF(center.x() - d, center.y() + d),
+                   QPointF(center.x() + d, center.y() - d))
 
 
 class ArchView3D(QWidget):
     """The 3D arch itself: orbiting camera, extruded crowns, force arrows."""
+
+    #: Emitted when a mouse orbit moves the camera off the selected preset.
+    preset_left = pyqtSignal()
 
     def __init__(self, store, tooth_to_cell: dict, scale: GlyphScale,
                  title: str = "Lower Arch — Force Components (3D)"):
@@ -347,17 +214,15 @@ class ArchView3D(QWidget):
         self.tooth_to_cell = tooth_to_cell
         self.scale = scale
         self.title = title
-        self.teeth, self.unit = build_arch()
+        self.arch = build_arch()
 
-        ys = [t.center[1] for t in self.teeth]
+        ys = [t.center[1] for t in self.arch.teeth]
         self.camera = Camera(
-            target=(0.0, (min(ys) + max(ys)) / 2, self.unit * 0.5),
+            target=(0.0, (min(ys) + max(ys)) / 2, self.arch.unit * 0.5),
             distance=CAM_DISTANCE,
         )
         self.zoom = 1.0
         self._drag_pos = None
-        self._ppu = 1.0          # px per world unit, refreshed every frame
-        self._fwd = (0.0, 0.0, -1.0)
         self.set_preset(DEFAULT_PRESET)
 
         self.setMinimumSize(460, 420)
@@ -370,6 +235,10 @@ class ArchView3D(QWidget):
         self.camera.set_orientation(math.radians(yaw), math.radians(pitch))
         self.preset_index = index % len(PRESETS)
         self.update()
+
+    def view_name(self):
+        return "Custom" if self.preset_index is None \
+            else PRESETS[self.preset_index][0]
 
     def reset_view(self):
         self.zoom = 1.0
@@ -389,6 +258,9 @@ class ArchView3D(QWidget):
         self._drag_pos = pos
         # Drag right spins the arch right; drag down tilts toward occlusal.
         self.camera.orbit(-dx * ORBIT_SENS, dy * ORBIT_SENS)
+        if self.preset_index is not None and (dx or dy):
+            self.preset_index = None
+            self.preset_left.emit()
         self.update()
 
     def mouseReleaseEvent(self, event):
@@ -405,10 +277,19 @@ class ArchView3D(QWidget):
 
     # ---- data ----
 
-    def _reading_for(self, cell_idx: Optional[int]):
-        if cell_idx is None or cell_idx >= self.store.n_cells:
-            return None
-        return self.store.latest(cell_idx)
+    def _readings(self):
+        """{tooth number: 6-axis reading} for every instrumented tooth.
+
+        One store read per cell per frame, shared by the arrows and the key's
+        numeric readout so the two can never show different samples.
+        """
+        latest = {}
+        for number, cell_idx in self.tooth_to_cell.items():
+            if cell_idx < self.store.n_cells:
+                vals = self.store.latest(cell_idx)
+                if vals is not None:
+                    latest[number] = vals
+        return latest
 
     # ---- painting ----
 
@@ -419,260 +300,165 @@ class ArchView3D(QWidget):
         p.fillRect(0, 0, w, h, _qcolor(theme.SURFACE))
 
         pane_w = max(120, w - KEY_W)
-        top_pad, bottom_pad, side_pad = 58, 22, 18
-        avail_w = max(60, pane_w - 2 * side_pad)
-        avail_h = max(60, h - top_pad - bottom_pad)
-
-        pr = self.camera.projector()
-
-        # Fit on the static crowns only: the view must not breathe as arrows grow.
-        us, vs = [], []
-        for t in self.teeth:
-            for pt in t.base:
-                u, v, _ = pr.project(pt)
-                us.append(u); vs.append(v)
-            for pt in t.top:
-                u, v, _ = pr.project(pt)
-                us.append(u); vs.append(v)
-        span_u = max(1e-6, max(us) - min(us))
-        span_v = max(1e-6, max(vs) - min(vs))
-        s = min(avail_w / span_u, avail_h / span_v) * FIT_MARGIN * self.zoom
-        cx = side_pad + avail_w / 2 - s * (min(us) + max(us)) / 2
-        cy = top_pad + avail_h / 2 + s * (min(vs) + max(vs)) / 2
-
-        def to_screen(u, v):
-            return QPointF(cx + s * u, cy - s * v)
-
-        def project(pt):
-            u, v, depth = pr.project(pt)
-            return QPointF(cx + s * u, cy - s * v), depth
-
-        # Screen px per world unit near the camera target, and the view axis --
-        # for the handful of decorations sized or oriented in 2D. `s` is px per
-        # *image* unit, and image coordinates are already divided by depth, so
-        # the world-unit scale carries the distance back in.
-        self._ppu = s / max(1e-6, self.camera.distance)
-        self._fwd = pr.fwd
+        frame = _Frame.fit(self.arch, self.camera, self.zoom, QRectF(
+            SIDE_PAD, TOP_PAD,
+            max(60, pane_w - 2 * SIDE_PAD), max(60, h - TOP_PAD - BOTTOM_PAD)))
+        readings = self._readings()
 
         p.save()
         p.setClipRect(QRectF(0, 0, pane_w, h))
-        self._draw_arch_curve(p, project)
-
-        # One drawable per tooth and per arrow, painted far-to-near so arrows
-        # behind a crown are hidden by it and arrows in front are not. Rings
-        # (arrows aimed along the view axis) are overlays: they mark a tooth's
-        # own occlusal surface, so nothing of that tooth may cover them.
-        drawables, overlays = [], []
-        for tooth in self.teeth:
-            cell_idx = self.tooth_to_cell.get(tooth.number)
-            vals = self._reading_for(cell_idx)
-            mapped = cell_idx is not None
-            _, depth = project(tooth.apex)
-            drawables.append((depth, lambda p, t=tooth, m=mapped, v=vals is not None:
-                              self._draw_tooth(p, t, project, pr, m, v)))
-            if vals is not None:
-                arrows, rings = self._arrow_drawables(tooth, vals, project, depth)
-                drawables.extend(arrows)
-                overlays.extend(rings)
-
-        drawables.sort(key=lambda d: -d[0])
-        for _, draw in drawables:
-            draw(p)
-        for draw in overlays:
-            draw(p)
-
-        for tooth in self.teeth:
-            self._draw_label(p, tooth, project)
+        self._draw_guide(p, frame)
+        for _, paint in sorted(self._primitives(frame, readings),
+                               key=lambda prim: -prim[0]):
+            paint(p)
+        for tooth in self.arch.teeth:
+            self._draw_label(p, frame, tooth)
         p.restore()
 
-        self._draw_key(p, pane_w, 0, KEY_W, h)
+        self._draw_key(p, pane_w, h, readings)
         self._draw_header(p)
         p.end()
 
-    def _draw_header(self, p):
-        f = QFont(); f.setPointSize(theme.FONT_SECTION); f.setBold(True)
-        p.setFont(f)
-        p.setPen(_qcolor(theme.ON_SURFACE))
-        p.drawText(18, 26, self.title)
+    def _primitives(self, frame, readings):
+        """Yield (depth, paint) for everything in the scene, unordered.
 
-        name = PRESETS[self.preset_index][0]
-        f2 = QFont(); f2.setPointSize(theme.FONT_BODY)
-        p.setFont(f2)
-        p.setPen(_qcolor(theme.ON_SURFACE_MUTED))
-        p.drawText(18, 44, f"{name} view · drag to orbit · scroll to zoom · "
-                           "dashed = no sensor mapped")
+        Depth is distance from the eye, so the caller paints in descending
+        order: far things first, near things over them.
+        """
+        for tooth in self.arch.teeth:
+            mapped = tooth.number in self.tooth_to_cell
+            apex_depth = frame.depth(tooth.apex)
+            draw = self._draw_crown if mapped else self._draw_footprint
+            yield apex_depth, partial(draw, frame=frame, tooth=tooth)
 
-    def _draw_arch_curve(self, p, project):
-        """Faint occlusal-plane guide through the crown centers -- the ground
-        plane cue that keeps the perspective readable."""
-        pts = []
-        a = ARCH_DEPTH / (ARCH_HALF_WIDTH ** 2)
-        n = 60
-        for i in range(n + 1):
-            x = -ARCH_HALF_WIDTH + 2 * ARCH_HALF_WIDTH * i / n
-            sp, _ = project((x, a * x * x, 0.0))
-            pts.append(sp)
-        pen = QPen(_qcolor(theme.OUTLINE), 1.0)
-        p.setPen(pen)
+            vals = readings.get(tooth.number)
+            if vals is not None:
+                yield from self._arrow_primitives(frame, tooth, vals, apex_depth)
+
+    def _arrow_primitives(self, frame, tooth, vals, apex_depth):
+        """One primitive per above-threshold component of this tooth.
+
+        An arrow's depth is clamped to its own tooth's apex so the crown it grows
+        out of can never swallow it -- an intrusive -Fz points straight into the
+        tooth body. Teeth nearer the camera still cover it.
+        """
+        for axis, direction in zip(self.scale.axes, tooth.frame):
+            value = vals[axis.index]
+            f = self.scale.frac(value)
+            if f is None:
+                continue
+            if value < 0:
+                direction = (-direction[0], -direction[1], -direction[2])
+            length = frame.unit * _lerp(ARROW_MIN_LEN, ARROW_MAX_LEN, f)
+            width = _lerp(ARROW_MIN_W, ARROW_MAX_W, f)
+            color = _qcolor(axis.color)
+
+            tail = frame.point(vmad(tooth.apex, direction,
+                                    frame.unit * ARROW_INSET))
+            tip = frame.point(vmad(tooth.apex, direction, length))
+            span = math.hypot(tip.x() - tail.x(), tip.y() - tail.y())
+            if span < AXIAL_MIN_FRAC * length * frame.ppu:
+                yield OVERLAY_DEPTH, partial(
+                    _paint_ring, center=tail, color=color, width=width,
+                    r=frame.ppu * frame.unit * _lerp(RING_MIN_R, RING_MAX_R, f),
+                    toward=frame.toward_viewer(direction))
+                continue
+
+            mid_depth = frame.depth(vmad(tooth.apex, direction, length * 0.5))
+            yield min(mid_depth, apex_depth) - 1e-4, partial(
+                self._draw_arrow, frame=frame, origin=tooth.apex,
+                direction=direction, length=length, color=color, width=width)
+
+    def _draw_arrow(self, p, frame, origin, direction, length, color, width):
+        head = min(frame.unit * ARROW_HEAD_LEN, length * 0.55)
+        inset = frame.unit * ARROW_INSET
+        _paint_arrow(
+            p,
+            frame.point(vmad(origin, direction, inset)),
+            frame.point(vmad(origin, direction, max(inset, length - head))),
+            frame.point(vmad(origin, direction, length)),
+            color, width)
+
+    def _draw_footprint(self, p, frame, tooth):
+        """A tooth with no cell mapped to it: a flat outline in the occlusal
+        plane, so the instrumented crowns are the only things standing up."""
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawPolyline(QPolygonF(pts))
+        p.setPen(QPen(_qcolor(theme.OUTLINE_STRONG), 1.1, Qt.PenStyle.DashLine))
+        p.drawPolygon(QPolygonF([frame.point(pt) for pt in tooth.base]))
 
-    def _draw_tooth(self, p, tooth, project, pr, mapped, live):
-        if not mapped:
-            # Unmapped teeth stay flat footprints in the occlusal plane, so the
-            # instrumented crowns are the only things standing up.
-            poly = QPolygonF([project(pt)[0] for pt in tooth.base])
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.setPen(QPen(_qcolor(theme.OUTLINE_STRONG), 1.1, Qt.PenStyle.DashLine))
-            p.drawPolygon(poly)
-            return
-
-        base = [project(pt) for pt in tooth.base]
-        top = [project(pt) for pt in tooth.top]
+    def _draw_crown(self, p, frame, tooth):
+        """An instrumented tooth: the extruded prism plus its arrow origin."""
+        base = [frame.place(pt) for pt in tooth.base]
+        top = [frame.place(pt) for pt in tooth.top]
         fill = _qcolor(theme.TOOTH_FILL)
-        outline = QPen(_qcolor(theme.OUTLINE_STRONG), 1.0)
 
         # Sides: cull the faces pointing away, then paint the rest back-to-front.
-        n = len(base)
-        quads = []
-        for i in range(n):
-            nrm = tooth.normals[i]
-            if vdot(nrm, pr.fwd) >= 0:
-                continue
-            j = (i + 1) % n
-            depth = (base[i][1] + base[j][1] + top[i][1] + top[j][1]) / 4
-            quads.append((depth, i, j, max(0.0, vdot(nrm, LIGHT_DIR))))
+        quads = [
+            ((base[i][1] + base[j][1] + top[i][1] + top[j][1]) / 4,
+             i, j, max(0.0, vdot(nrm, LIGHT_DIR)))
+            for i, j, nrm in tooth.edges() if not frame.hidden(nrm)
+        ]
         quads.sort(key=lambda q: -q[0])
         p.setPen(Qt.PenStyle.NoPen)
         for _, i, j, lam in quads:
             p.setBrush(QBrush(_shade(fill, lam)))
             p.drawPolygon(QPolygonF([base[i][0], base[j][0], top[j][0], top[i][0]]))
 
-        # Occlusal face last: with the camera always above the plane it is the
-        # nearest face of the prism.
+        # Occlusal face last: with the camera always above the plane (see
+        # Camera.PITCH_MIN) it is the nearest face of the prism.
         p.setBrush(QBrush(_shade(fill, vdot(tooth.e_z, LIGHT_DIR))))
-        p.setPen(outline)
+        p.setPen(QPen(_qcolor(theme.OUTLINE_STRONG), 1.0))
         p.drawPolygon(QPolygonF([sp for sp, _ in top]))
 
-        # Common origin of the three arrows.
-        apex, _ = project(tooth.apex)
-        r = max(1.5, self.unit * ORIGIN_DOT_R * self._ppu)
+        # Common origin of this tooth's three arrows.
+        r = max(1.5, frame.unit * ORIGIN_DOT_R * frame.ppu)
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(_qcolor(theme.ON_SURFACE_SUBTLE if not live
-                                  else theme.ON_SURFACE_MUTED)))
-        p.drawEllipse(apex, r, r)
+        p.setBrush(QBrush(_qcolor(theme.ON_SURFACE_MUTED)))
+        p.drawEllipse(frame.point(tooth.apex), r, r)
 
-    def _arrow_drawables(self, tooth, vals, project, apex_depth):
-        """Drawables for this tooth's above-threshold force components.
-
-        Returns `(arrows, rings)`. An arrow aimed close to the view axis has
-        almost no projected length, so its shaft would lie about magnitude --
-        those become ring glyphs, returned separately because they belong on
-        top of their own crown.
-
-        Depth keys are clamped to the tooth's own apex so an arrow can never be
-        swallowed by the crown it grows out of (an intrusive -Fz points straight
-        into the tooth body); other teeth nearer the camera still cover it.
-        """
-        scale = self.scale
-        arrows, rings = [], []
-        axes = (
-            (vals[scale.idx[0]], tooth.e_x, scale.colors[0]),
-            (vals[scale.idx[1]], tooth.e_y, scale.colors[1]),
-            (vals[scale.idx[2]], tooth.e_z, scale.colors[2]),
-        )
-        for value, axis, color in axes:
-            f = _frac(value, scale)
-            if f is None:
-                continue
-            sign = 1.0 if value >= 0 else -1.0
-            direction = (axis[0] * sign, axis[1] * sign, axis[2] * sign)
-            length = self.unit * _lerp(ARROW_MIN_LEN, ARROW_MAX_LEN, f)
-            width = _lerp(ARROW_MIN_W, ARROW_MAX_W, f)
-
-            tail_pt, _ = project(vmad(tooth.apex, direction,
-                                      self.unit * ARROW_INSET))
-            tip_pt, _ = project(vmad(tooth.apex, direction, length))
-            span = math.hypot(tip_pt.x() - tail_pt.x(), tip_pt.y() - tail_pt.y())
-            if span < AXIAL_MIN_FRAC * length * self._ppu:
-                toward = vdot(direction, self._fwd) < 0
-                rings.append(lambda p, pt=tail_pt, c=color, wd=width, fr=f,
-                             tw=toward:
-                             self._draw_axial_ring(p, pt, _qcolor(c), wd, fr, tw))
-                continue
-
-            _, mid_depth = project(vmad(tooth.apex, direction, length * 0.5))
-            depth = min(mid_depth, apex_depth) - 1e-4
-            arrows.append((depth, lambda p, d=direction, L=length, c=color,
-                           wd=width:
-                           self._draw_arrow(p, project, tooth.apex, d, L,
-                                            _qcolor(c), wd)))
-        return arrows, rings
-
-    def _draw_arrow(self, p, project, origin, direction, length, color, width):
-        """3D arrow: projected shaft plus a screen-space billboarded head."""
-        head = min(self.unit * ARROW_HEAD_LEN, length * 0.55)
-        inset = self.unit * ARROW_INSET
-        tail_pt, _ = project(vmad(origin, direction, inset))
-        neck_pt, _ = project(vmad(origin, direction, max(inset, length - head)))
-        tip_pt, _ = project(vmad(origin, direction, length))
-
-        pen = QPen(color, width)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        p.setPen(pen)
+    def _draw_guide(self, p, frame):
+        """Faint occlusal-plane curve through the crown centers -- the ground
+        plane cue that keeps the perspective readable."""
+        p.setPen(QPen(_qcolor(theme.OUTLINE), 1.0))
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawLine(tail_pt, neck_pt)
+        p.drawPolyline(QPolygonF([frame.point(pt) for pt in self.arch.guide]))
 
-        dx, dy = tip_pt.x() - neck_pt.x(), tip_pt.y() - neck_pt.y()
-        seg = math.hypot(dx, dy)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(color))
-        if seg < 0.75:
-            p.drawEllipse(tip_pt, width * 1.3, width * 1.3)
-            return
-        px, py = -dy / seg, dx / seg
-        half = seg * 0.42
-        p.drawPolygon(QPolygonF([
-            tip_pt,
-            QPointF(neck_pt.x() + px * half, neck_pt.y() + py * half),
-            QPointF(neck_pt.x() - px * half, neck_pt.y() - py * half),
-        ]))
-
-    def _draw_axial_ring(self, p, center, color, width, frac, toward):
-        """Ring sized by magnitude: filled dot = toward the viewer (the arrow
-        points out of the screen), cross = away from it."""
-        r = self._ppu * self.unit * _lerp(RING_MIN_R, RING_MAX_R, frac)
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(color, width))
-        p.drawEllipse(center, r, r)
-        if toward:
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QBrush(color))
-            p.drawEllipse(center, r * 0.45, r * 0.45)
-        else:
-            d = r * 0.62
-            p.drawLine(QPointF(center.x() - d, center.y() - d),
-                       QPointF(center.x() + d, center.y() + d))
-            p.drawLine(QPointF(center.x() - d, center.y() + d),
-                       QPointF(center.x() + d, center.y() - d))
-
-    def _draw_label(self, p, tooth, project):
-        sp, _ = project(tooth.label_anchor)
-        f = QFont(); f.setPointSize(theme.FONT_CAPTION); f.setBold(True)
+    def _draw_label(self, p, frame, tooth):
+        f = QFont()
+        f.setPointSize(theme.FONT_CAPTION)
+        f.setBold(True)
         p.setFont(f)
         mapped = tooth.number in self.tooth_to_cell
         p.setPen(_qcolor(theme.ON_SURFACE if mapped else theme.ON_SURFACE_SUBTLE))
         text = PALMER_LABEL.get(tooth.number, str(tooth.number))
+        sp = frame.point(tooth.label_anchor)
         fm = p.fontMetrics()
         p.drawText(QPointF(sp.x() - fm.horizontalAdvance(text) / 2,
                            sp.y() + fm.height() / 3), text)
 
+    def _draw_header(self, p):
+        f = QFont()
+        f.setPointSize(theme.FONT_SECTION)
+        f.setBold(True)
+        p.setFont(f)
+        p.setPen(_qcolor(theme.ON_SURFACE))
+        p.drawText(18, 26, self.title)
+
+        f2 = QFont()
+        f2.setPointSize(theme.FONT_BODY)
+        p.setFont(f2)
+        p.setPen(_qcolor(theme.ON_SURFACE_MUTED))
+        p.drawText(18, 44, f"{self.view_name()} view · drag to orbit · "
+                           "scroll to zoom · dashed = no sensor mapped")
+
     # ---- key column ----
 
-    def _draw_key(self, p, x, y, w, h):
+    def _draw_key(self, p, x, h, readings):
         scale = self.scale
         left = x + 12
-        cur = y + 26
+        cur = 26
+        fg = _qcolor(theme.ON_SURFACE)
+        muted = _qcolor(theme.ON_SURFACE_MUTED)
 
         heading = QFont(); heading.setPointSize(theme.FONT_BODY); heading.setBold(True)
         caption = QFont(); caption.setPointSize(theme.FONT_CAPTION)
@@ -680,122 +466,91 @@ class ArchView3D(QWidget):
         mono = QFont("monospace"); mono.setPointSize(theme.FONT_CAPTION)
 
         p.setFont(heading)
-        p.setPen(_qcolor(theme.ON_SURFACE))
+        p.setPen(fg)
         p.drawText(int(left), int(cur), scale.unit_label)
         cur += 20
 
         # Which arrow is which axis.
-        axis_desc = ("mesio-distal", "bucco-lingual", "occlusal")
-        for name, color, desc in zip(scale.names, scale.colors, axis_desc):
-            self._draw_flat_arrow(p, left, cur, 26, _qcolor(color), 2.2)
+        for axis in scale.axes:
+            self._key_arrow(p, left, cur, 26, _qcolor(axis.color), 2.2)
             p.setFont(caption)
-            p.setPen(_qcolor(theme.ON_SURFACE))
-            p.drawText(int(left + 34), int(cur + 4), name)
-            p.setPen(_qcolor(theme.ON_SURFACE_MUTED))
-            p.drawText(int(left + 34), int(cur + 16), desc)
+            p.setPen(fg)
+            p.drawText(int(left + 34), int(cur + 4), axis.name)
+            p.setPen(muted)
+            p.drawText(int(left + 34), int(cur + 16), axis.description)
             cur += 30
 
         cur += 4
         p.setFont(caption)
-        p.setPen(_qcolor(theme.ON_SURFACE_MUTED))
+        p.setPen(muted)
         p.drawText(int(left), int(cur), "Length")
         cur += 14
-        fg = _qcolor(theme.ON_SURFACE)
         for value, plen, width in ((scale.lo, 24, ARROW_MIN_W),
                                    (scale.hi, 58, ARROW_MAX_W)):
-            self._draw_flat_arrow(p, left, cur, plen, fg, width)
+            self._key_arrow(p, left, cur, plen, fg, width)
             p.setFont(caption)
-            p.setPen(_qcolor(theme.ON_SURFACE))
+            p.setPen(fg)
             p.drawText(int(left + 64), int(cur + 4), f"{value:g}")
             cur += 22
 
         # Ring glyph: what an arrow becomes when it aims along the view axis.
         cur += 6
         p.setFont(caption)
-        p.setPen(_qcolor(theme.ON_SURFACE_MUTED))
+        p.setPen(muted)
         p.drawText(int(left), int(cur), "Along view axis")
         cur += 16
         for toward, text in ((True, "toward you"), (False, "away")):
-            self._draw_key_ring(p, left + 8, cur, 7.0, fg, 1.8, toward)
-            p.setPen(_qcolor(theme.ON_SURFACE))
+            _paint_ring(p, QPointF(left + 8, cur), KEY_RING_R, fg, 1.8, toward)
+            p.setPen(fg)
             p.drawText(int(left + 24), int(cur + 4), text)
             cur += 20
 
         cur += 6
         p.setFont(note)
-        p.setPen(_qcolor(theme.ON_SURFACE_MUTED))
-        p.drawText(int(left), int(cur), f"< {scale.lo:g}: not shown")
-        cur += 14
-        p.drawText(int(left), int(cur), f"clamped at {scale.hi:g}")
-        cur += 14
-        p.drawText(int(left), int(cur), "each tooth's own frame")
-        cur += 22
+        p.setPen(muted)
+        for line in (f"< {scale.lo:g}: not shown", f"clamped at {scale.hi:g}",
+                     "each tooth's own frame"):
+            p.drawText(int(left), int(cur), line)
+            cur += 14
+        cur += 8
 
-        # Live values for the instrumented teeth -- an arrow says "which way",
-        # this says "how much".
+        # Live values for the instrumented teeth -- an arrow says which way,
+        # this says how much.
         if not self.tooth_to_cell:
-            p.setFont(note)
-            p.setPen(_qcolor(theme.ON_SURFACE_MUTED))
             p.drawText(int(left), int(cur), "no cell mapped to")
             p.drawText(int(left), int(cur + 13), "a lower-arch tooth")
             return
 
         p.setFont(caption)
-        p.setPen(_qcolor(theme.ON_SURFACE_MUTED))
+        p.setPen(muted)
         p.drawText(int(left), int(cur), "Live")
         cur += 14
+        p.setFont(mono)
         for number in sorted(self.tooth_to_cell, key=LOWER_ARCH_ORDER.index):
             if cur > h - 26:
                 break
-            vals = self._reading_for(self.tooth_to_cell[number])
-            p.setFont(mono)
-            p.setPen(_qcolor(theme.ON_SURFACE))
-            label = PALMER_LABEL.get(number, str(number))
-            p.drawText(int(left), int(cur), label)
+            p.setPen(fg)
+            p.drawText(int(left), int(cur), PALMER_LABEL.get(number, str(number)))
+            vals = readings.get(number)
             if vals is None:
                 p.setPen(_qcolor(theme.ON_SURFACE_SUBTLE))
                 p.drawText(int(left + 34), int(cur), "--")
             else:
-                xoff = 34
-                for ai, color in zip(self.scale.idx, self.scale.colors):
-                    p.setPen(_qcolor(color))
-                    p.drawText(int(left + xoff), int(cur), f"{vals[ai]:+.2f}")
-                    xoff += 44
+                for i, axis in enumerate(scale.axes):
+                    v = vals[axis.index]
+                    # Drop the decimals on big readings rather than run the
+                    # column off the edge of the key.
+                    p.setPen(_qcolor(axis.color))
+                    p.drawText(int(left + 34 + i * 52), int(cur),
+                               f"{v:+.2f}" if abs(v) < 100 else f"{v:+.0f}")
             cur += 14
 
     @staticmethod
-    def _draw_key_ring(p, x, y, r, color, width, toward):
-        """Fixed-size copy of the axial ring glyph, for the key."""
-        c = QPointF(x, y)
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(color, width))
-        p.drawEllipse(c, r, r)
-        if toward:
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QBrush(color))
-            p.drawEllipse(c, r * 0.45, r * 0.45)
-        else:
-            d = r * 0.62
-            p.drawLine(QPointF(x - d, y - d), QPointF(x + d, y + d))
-            p.drawLine(QPointF(x - d, y + d), QPointF(x + d, y - d))
-
-    @staticmethod
-    def _draw_flat_arrow(p, x, y, length, color, width):
-        """Straight right-pointing arrow in screen space, for the key."""
-        head = 8.0
-        pen = QPen(color, width)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        p.setPen(pen)
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawLine(QPointF(x, y), QPointF(x + length - head * 0.85, y))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(color))
-        bx = x + length - head * 0.85
-        p.drawPolygon(QPolygonF([
-            QPointF(x + length, y),
-            QPointF(bx, y - head * 0.42),
-            QPointF(bx, y + head * 0.42),
-        ]))
+    def _key_arrow(p, x, y, length, color, width):
+        """Straight right-pointing sample arrow, in the key's flat 2D space."""
+        neck_x = x + length - KEY_ARROW_HEAD * 0.85
+        _paint_arrow(p, QPointF(x, y), QPointF(neck_x, y),
+                     QPointF(x + length, y), color, width)
 
 
 class ArchTab(QWidget):
@@ -859,6 +614,7 @@ class ArchTab(QWidget):
         root.addWidget(self.view, 1)
 
         self._highlight_preset(DEFAULT_PRESET)
+        self.view.preset_left.connect(lambda: self._highlight_preset(None))
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._refresh)
@@ -873,6 +629,7 @@ class ArchTab(QWidget):
         self._highlight_preset(DEFAULT_PRESET)
 
     def _highlight_preset(self, index):
+        """Mark the active preset, or none of them once the user has orbited."""
         for i, btn in enumerate(self.preset_buttons):
             btn.setProperty("variant", "primary" if i == index else "")
             btn.style().unpolish(btn)

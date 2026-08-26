@@ -101,7 +101,10 @@ class Camera:
     the projected coordinates, not by dollying the camera.
     """
 
-    PITCH_MIN = math.radians(-5.0)
+    # Stay above the occlusal plane: the arch view paints each crown's top face
+    # last on the assumption that it is the prism's near face, which only holds
+    # while the camera looks down on the plane.
+    PITCH_MIN = math.radians(2.0)
     PITCH_MAX = math.radians(89.5)
 
     def __init__(self, target=(0.0, 0.0, 0.0), distance=4.0,
