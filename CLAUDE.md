@@ -43,11 +43,11 @@ The `graphDash/` package is the main codebase, with `graphDash.py` at the repo r
 
 - `__main__.py` — entry point: arg parsing, config loading, DB init, thread wiring, pyqtgraph global config, `theme.apply(app)`, Qt event loop.
 - `constants.py` — MMS101 command bytes, axis names/colors (colorblind-safe `tab10` palette), UI defaults (`REFRESH_MS`, `MAX_BUFFER_SAMPLES`, etc.).
-- `protocol.py` — `s24()` 3-byte signed-int decoder, `Sensor` (real SPI hardware), `DummySensor` (fixed-value simulation — returns a constant 6-axis reading). `Sensor.read_all()` returns `[Fx, Fy, Fz, Mx, My, Mz]` in `[N, N, N, N·m, N·m, N·m]`. The matrix-multiply result is right-shifted by 11 bits (÷2048), then forces are divided by 1000 (`0.001 N` LSB → N) and moments by 100000 (`0.00001 N·m` LSB → N·m) per the MMS101 datasheet matrix-operation section. **This per-axis scaling only lives in `graphDash/protocol.py`** — the standalone `stream.py` and `stream_threaded.py` streamers at the repo root still divide all six axes by 1000 (they only read forces, so it doesn't matter there; if you ever add moment support to them, apply the 100000 divisor).
+- `protocol.py` — `s24()` 3-byte signed-int decoder, `Sensor` (real SPI hardware), `DummySensor` (simulation source for `--debug`). **`DummySensor.read_all()` contains two hand-toggled bodies** — a sine-wave generator and a fixed `vals` dict — one of which is commented out at any time. Which one is live changes as the user debugs; don't treat either as the intended version or "restore" the other one, and don't write tests that assume constant readings (use a local stub sensor instead). `Sensor.read_all()` returns `[Fx, Fy, Fz, Mx, My, Mz]` in `[N, N, N, N·m, N·m, N·m]`. The matrix-multiply result is right-shifted by 11 bits (÷2048), then forces are divided by 1000 (`0.001 N` LSB → N) and moments by 100000 (`0.00001 N·m` LSB → N·m) per the MMS101 datasheet matrix-operation section. **This per-axis scaling only lives in `graphDash/protocol.py`** — the standalone `stream.py` and `stream_threaded.py` streamers at the repo root still divide all six axes by 1000 (they only read forces, so it doesn't matter there; if you ever add moment support to them, apply the 100000 divisor).
 - `datastore.py` — `DataStore`: thread-safe ring buffer (`collections.deque` + `threading.Lock`, `MAX_BUFFER_SAMPLES=5000`). `get_cell()` supports windowing to the last N seconds and returns time relative to the window's first sample.
 - `csv_logger.py` — `CSVLogger`: long-lived background `threading.Thread` with per-recording lifecycle (see "Recording lifecycle" below).
-- `sampler.py` — `Sampler`: background thread that polls all cells (real or simulated) at `rate_hz` and runs the sample pipeline (see "Sample pipeline" below), pushing one `readings` list into both `DataStore` and `CSVLogger` so the graph and the CSV can never diverge. `running` gates whether it's actively sampling; `simulate` gates real vs. dummy sensors — both are toggled live from the UI.
-- `force_moment.py` — Force/moment override computation (see "Force/moment overrides" below). Contains `PositionVectors` (thread-safe per-tooth-type position vector store, `r = [rx, ry, rz]`), `TareOffsets`, and `compute_adjusted()` (applies threshold-based force/moment corrections). Importing this module has **no side effects** — the validation harness lives in `tests/test_compensation.py`, not here.
+- `sampler.py` — `Sampler`: background thread that polls all cells (real or simulated) at `rate_hz` and runs the sample pipeline (see "Sample pipeline" below), pushing one `readings` list into both `DataStore` and `CSVLogger` so the graph and the CSV can never diverge. `running` gates whether it's actively sampling; `simulate` gates real vs. dummy sensors — both are toggled live from the UI. `get_last_raw(ci)` / `get_all_last_raw()` expose the pre-tare readings the tare controls snapshot.
+- `force_moment.py` — Force/moment override computation (see "Force/moment overrides" below). Contains `PositionVectors` (thread-safe per-tooth-type position vector store, `r = [rx, ry, rz]`), `TareOffsets` (per-cell `get`/`set`/`clear` plus the all-cell `set_all()`/`clear_all()` the global tare uses), and `compute_adjusted()` (applies threshold-based force/moment corrections). Importing this module has **no side effects** — the validation harness lives in `tests/test_compensation.py`, not here.
 - `session_manager.py` — SQLite operations for session tracking (see "SQLite session database" below).
 - `config.py` — `load_sensor_config()` / `save_sensor_config()` (YAML), `build_simulation_cells()` (creates `DummySensor` instances), and `try_init_sensors()` (constructs + inits real `Sensor`s, surfacing per-cell wiring failures instead of raising).
 - `paths.py` — Cross-platform path resolution: detects Pi (`/home/sparkrnd` exists) vs. laptop, and returns the appropriate log root, logs directory, and database path.
@@ -116,6 +116,12 @@ Resolved by `graphDash/paths.py`:
 
 `config/sensors.yaml` lists cells as `{name, bus, dev, csb_gpio, tooth, tooth_type}` (SPI bus/device, the GPIO used for chip-select, an optional Universal tooth number for the arch heatmap, and a tooth type for force/moment overrides). Bus/GPIO numbers here are physical wiring facts about the current rig — don't "fix" values that look inconsistent (e.g. two cells sharing a bus) without confirming with the user, since they reflect actual hardware, not bugs.
 
+**Chip-select requirements** — cells may share an SPI `bus` (SCLK/MOSI/MISO are physically shared and normal), but each cell on a bus must have a **unique `csb_gpio`**. `Sensor._xfer()` asserts that GPIO as the real chip-select around each transaction, so two cells with the same `csb_gpio` are selected at once and drive MISO simultaneously — that's true electrical bus contention and garbage data, not a subtle timing bug. Correctness also assumes each deselected MMS101 tri-states MISO. Two further constraints when picking values:
+- **Avoid the bus's hardware CE pins (and the reserved EEPROM pins) for `csb_gpio`.** `spi.open(bus, dev)` still pulses the hardware CE line selected by `dev` on every transfer regardless of the GPIO chip-select (SPI0 → CE0=GPIO8, CE1=GPIO7), so a `csb_gpio` of 7/8 — or 0/1, the ID_SD/ID_SC HAT-EEPROM pins — will fight another driver.
+- **Same-bus reads must stay serialized.** There is no per-bus lock; the only thing preventing contention is the read model — `sampler.py` reads all cells sequentially in one thread, and `stream_threaded.py` uses one worker thread per bus. Reading two same-bus cells from different threads would interleave the assert/xfer/deassert in `_xfer` and reselect both. Add a `threading.Lock` per bus before introducing any per-cell threading on a shared bus.
+
+Note: the current `sensors.yaml` has all cells on the same `bus`/`dev`/`csb_gpio`, so they cannot be addressed individually — surface that to the user rather than silently rewiring, per the "confirm with the user" note above.
+
 The `tooth` field (optional) maps a sensor to a specific tooth in the lower dental arch using Universal numbering (17–32). This drives the Arch View heatmap tab.
 
 The `tooth_type` field assigns a tooth category — `central_incisor`, `premolar`, or `molar` — which determines the default position vector `r = [rx, ry, rz]` (chiefly the default `rz`) used for force/moment override computations. It is schema-optional, but **a cell without one gets no compensation at all** (see "Sample pipeline"), so in practice every cell on the rig should have it set.
@@ -125,11 +131,13 @@ The `tooth_type` field assigns a tooth category — `central_incisor`, `premolar
 Every sample follows exactly one chain, in `Sampler.run()`:
 
 ```
-raw (protocol.py)  ->  - TareOffsets.get(cell)  ->  compute_adjusted(tared, tooth_type, pos_vectors)
-                                                             |
-                                          one `readings` list, shared by:
-                                          DataStore.append()  ->  Cell Graphs / Arch View
-                                          CSVLogger.log_sample()  ->  log_<ts>.csv
+1. raw    = cell.read_all()                          # protocol.py, N and N*m
+2. tared  = raw - TareOffsets.get(ci)                # per-cell 6-axis offset
+3. adj    = compute_adjusted(tared, tooth_type, pv)  # force_moment.py, moments -> N*mm
+                                                     # skipped if no tooth_type -> adj = tared
+                    |
+                    +--> DataStore.append()      -> Cell Graphs / Arch View
+                    +--> CSVLogger.log_sample()  -> log_<ts>.csv
 ```
 
 `store.append()` and `csv_logger.log_sample()` are handed the **same** `readings` objects, so
