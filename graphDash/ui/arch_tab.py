@@ -1,9 +1,14 @@
-"""3D arch view: one lower arch, three force arrows per instrumented tooth.
+"""3D arch view: one lower arch, force or moment arrows per instrumented tooth.
 
 `arch_model.py` owns the arch geometry and the reading-to-arrow scale; `proj3d.py`
 owns the camera. This module is the view: it fits the arch to the pane, turns one
 frame's readings into depth-sorted primitives, paints them with QPainter, and
 wires up the camera controls.
+
+Two toggles pick what the arrows mean. DATA swaps the whole view between the
+force and the moment `GlyphScale`; SHOW swaps the three per-axis component
+arrows for a single red arrow along their vector sum, drawn in the same tooth
+frame (`arch_model.ResultantSpec`, which carries its own larger `hi`).
 
 Arrow length is linear in |value| across the scale's [lo, hi]: below `lo` the
 axis draws nothing, at or above `hi` it clamps to the longest arrow. So a longer
@@ -24,13 +29,14 @@ from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QFont, QPolygonF
 
 from graphDash.constants import REFRESH_MS
 from graphDash.ui import theme
-from graphDash.ui.proj3d import Camera, vdot, vunit, vmad
+from graphDash.ui.proj3d import Camera, vdot, vnorm, vunit, vmad
 from graphDash.ui.arch_model import (
     build_arch, GlyphScale, FORCE_GLYPH, MOMENT_GLYPH,
     LOWER_ARCH_ORDER, PALMER_LABEL, TOOTH_TYPE,
 )
 
-__all__ = ["ArchTab", "ArchView3D", "FORCE_GLYPH", "MOMENT_GLYPH", "PRESETS"]
+__all__ = ["ArchTab", "ArchView3D", "FORCE_GLYPH", "MOMENT_GLYPH",
+           "DATA_SCALES", "PRESETS"]
 
 
 def _qcolor(hex_str):
@@ -69,6 +75,8 @@ PRESETS = (
     ("Anterior",   0.0,  6.0),
 )
 DEFAULT_PRESET = 0
+# What the DATA toggle picks between, in button order.
+DATA_SCALES = (FORCE_GLYPH, MOMENT_GLYPH)
 # The arch spans ~2 x 1.3 world units. Keep the eye well outside that so a near
 # tooth can never approach the camera and blow up under the perspective divide
 # -- the view fits the pane by scaling, so a longer lens costs nothing.
@@ -208,13 +216,14 @@ class ArchView3D(QWidget):
     preset_left = pyqtSignal()
 
     def __init__(self, store, tooth_to_cell: dict, scale: GlyphScale,
-                 title: str = "Lower Arch — Force Components (3D)"):
+                 show_resultant: bool = False):
         super().__init__()
         self.store = store
         self.tooth_to_cell = tooth_to_cell
         self.scale = scale
-        self.title = title
+        self.show_resultant = show_resultant
         self.arch = build_arch()
+        self._tooth_by_number = {t.number: t for t in self.arch.teeth}
 
         ys = [t.center[1] for t in self.arch.teeth]
         self.camera = Camera(
@@ -227,6 +236,24 @@ class ArchView3D(QWidget):
 
         self.setMinimumSize(460, 420)
         self.setCursor(Qt.CursorShape.OpenHandCursor)
+
+    # ---- what the arrows mean ----
+
+    @property
+    def title(self):
+        kind = "Resultant" if self.show_resultant else "Components"
+        return f"Lower Arch — {self.scale.quantity} {kind} (3D)"
+
+    def set_scale(self, scale: GlyphScale):
+        """Swap force <-> moment. Only the scale changes; the arch, the camera
+        and the tooth mapping are the same either way."""
+        self.scale = scale
+        self.update()
+
+    def set_resultant(self, on: bool):
+        """Swap the three component arrows for their single vector sum."""
+        self.show_resultant = bool(on)
+        self.update()
 
     # ---- camera control ----
 
@@ -335,23 +362,51 @@ class ArchView3D(QWidget):
             if vals is not None:
                 yield from self._arrow_primitives(frame, tooth, vals, apex_depth)
 
+    def _glyph_vectors(self, tooth, vals):
+        """Yield (unit direction, 0-1 length fraction, color) for one tooth.
+
+        Component mode yields one entry per above-threshold axis, each along one
+        of that tooth's own basis vectors. Resultant mode yields at most one,
+        along the vector sum of the three components in that same frame -- so the
+        arrow points the way the tooth is actually being pushed (or twisted),
+        and clamps at the resultant's own larger `hi`.
+        """
+        scale = self.scale
+        if self.show_resultant:
+            total = self._resultant_vector(tooth, vals)
+            f = scale.resultant_frac(vnorm(total))
+            if f is not None:
+                yield vunit(total), f, _qcolor(scale.resultant.color)
+            return
+        for axis, basis in zip(scale.axes, tooth.frame):
+            value = vals[axis.index]
+            f = scale.frac(value)
+            if f is None:
+                continue
+            direction = basis if value >= 0 \
+                else (-basis[0], -basis[1], -basis[2])
+            yield direction, f, _qcolor(axis.color)
+
+    def _resultant_vector(self, tooth, vals):
+        """The three components summed in this tooth's own frame, as a world
+        vector. Its magnitude is what the resultant arrow and the key's numeric
+        readout both report."""
+        total = (0.0, 0.0, 0.0)
+        for axis, basis in zip(self.scale.axes, tooth.frame):
+            total = vmad(total, basis, vals[axis.index])
+        return total
+
     def _arrow_primitives(self, frame, tooth, vals, apex_depth):
-        """One primitive per above-threshold component of this tooth.
+        """One primitive per glyph this tooth shows: its above-threshold
+        components, or the single resultant arrow.
 
         An arrow's depth is clamped to its own tooth's apex so the crown it grows
         out of can never swallow it -- an intrusive -Fz points straight into the
         tooth body. Teeth nearer the camera still cover it.
         """
-        for axis, direction in zip(self.scale.axes, tooth.frame):
-            value = vals[axis.index]
-            f = self.scale.frac(value)
-            if f is None:
-                continue
-            if value < 0:
-                direction = (-direction[0], -direction[1], -direction[2])
+        for direction, f, color in self._glyph_vectors(tooth, vals):
             length = frame.unit * _lerp(ARROW_MIN_LEN, ARROW_MAX_LEN, f)
             width = _lerp(ARROW_MIN_W, ARROW_MAX_W, f)
-            color = _qcolor(axis.color)
 
             tail = frame.point(vmad(tooth.apex, direction,
                                     frame.unit * ARROW_INSET))
@@ -455,6 +510,9 @@ class ArchView3D(QWidget):
 
     def _draw_key(self, p, x, h, readings):
         scale = self.scale
+        resultant = self.show_resultant
+        # The resultant clamps later than a single component does.
+        hi = scale.resultant.hi if resultant else scale.hi
         left = x + 12
         cur = 26
         fg = _qcolor(theme.ON_SURFACE)
@@ -470,14 +528,14 @@ class ArchView3D(QWidget):
         p.drawText(int(left), int(cur), scale.unit_label)
         cur += 20
 
-        # Which arrow is which axis.
-        for axis in scale.axes:
-            self._key_arrow(p, left, cur, 26, _qcolor(axis.color), 2.2)
+        # Which arrow is which: one row per axis, or the single resultant.
+        for spec in ((scale.resultant,) if resultant else scale.axes):
+            self._key_arrow(p, left, cur, 26, _qcolor(spec.color), 2.2)
             p.setFont(caption)
             p.setPen(fg)
-            p.drawText(int(left + 34), int(cur + 4), axis.name)
+            p.drawText(int(left + 34), int(cur + 4), spec.name)
             p.setPen(muted)
-            p.drawText(int(left + 34), int(cur + 16), axis.description)
+            p.drawText(int(left + 34), int(cur + 16), spec.description)
             cur += 30
 
         cur += 4
@@ -486,7 +544,7 @@ class ArchView3D(QWidget):
         p.drawText(int(left), int(cur), "Length")
         cur += 14
         for value, plen, width in ((scale.lo, 24, ARROW_MIN_W),
-                                   (scale.hi, 58, ARROW_MAX_W)):
+                                   (hi, 58, ARROW_MAX_W)):
             self._key_arrow(p, left, cur, plen, fg, width)
             p.setFont(caption)
             p.setPen(fg)
@@ -508,8 +566,9 @@ class ArchView3D(QWidget):
         cur += 6
         p.setFont(note)
         p.setPen(muted)
-        for line in (f"< {scale.lo:g}: not shown", f"clamped at {scale.hi:g}",
-                     "each tooth's own frame"):
+        for line in (f"< {scale.lo:g}: not shown", f"clamped at {hi:g}",
+                     "vector sum, tooth frame" if resultant
+                     else "each tooth's own frame"):
             p.drawText(int(left), int(cur), line)
             cur += 14
         cur += 8
@@ -535,15 +594,31 @@ class ArchView3D(QWidget):
             if vals is None:
                 p.setPen(_qcolor(theme.ON_SURFACE_SUBTLE))
                 p.drawText(int(left + 34), int(cur), "--")
+            elif resultant:
+                # One magnitude, matching the one arrow that is drawn.
+                p.setPen(_qcolor(scale.resultant.color))
+                p.drawText(int(left + 34), int(cur),
+                           self._reading_text(self._magnitude(number, vals),
+                                              signed=False))
             else:
                 for i, axis in enumerate(scale.axes):
-                    v = vals[axis.index]
-                    # Drop the decimals on big readings rather than run the
-                    # column off the edge of the key.
                     p.setPen(_qcolor(axis.color))
                     p.drawText(int(left + 34 + i * 52), int(cur),
-                               f"{v:+.2f}" if abs(v) < 100 else f"{v:+.0f}")
+                               self._reading_text(vals[axis.index]))
             cur += 14
+
+    def _magnitude(self, number, vals):
+        """|resultant| for one tooth -- the same vector the arrow is drawn along."""
+        tooth = self._tooth_by_number.get(number)
+        return vnorm(self._resultant_vector(tooth, vals)) if tooth else 0.0
+
+    @staticmethod
+    def _reading_text(v, signed=True):
+        """Drop the decimals on big readings rather than run the column off the
+        edge of the key. A magnitude is never signed."""
+        sign = "+" if signed else ""
+        return format(v, f"{sign}.2f") if abs(v) < 100 \
+            else format(v, f"{sign}.0f")
 
     @staticmethod
     def _key_arrow(p, x, y, length, color, width):
@@ -553,8 +628,17 @@ class ArchView3D(QWidget):
                      QPointF(x + length, y), color, width)
 
 
+def _set_active(buttons, index):
+    """Mark one button of an exclusive group active, or none when `index` is
+    None (which is what an orbit off a camera preset leaves behind)."""
+    for i, btn in enumerate(buttons):
+        btn.setProperty("variant", "primary" if i == index else "")
+        btn.style().unpolish(btn)
+        btn.style().polish(btn)
+
+
 class ArchTab(QWidget):
-    """One 3D lower arch with camera presets above it."""
+    """One 3D lower arch, with camera presets and the arrow toggles above it."""
 
     @staticmethod
     def _build_tooth_to_cell(tooth_per_cell):
@@ -581,59 +665,88 @@ class ArchTab(QWidget):
         self.view = ArchView3D(
             store,
             self._build_tooth_to_cell(self.tooth_per_cell),
-            scale=FORCE_GLYPH,
+            scale=DATA_SCALES[0],
         )
 
-        bar = QHBoxLayout()
-        bar.setContentsMargins(14, 8, 14, 4)
-        bar.setSpacing(8)
-        label = QLabel("VIEW")
-        label.setStyleSheet(
-            f"font-size: {theme.FONT_CAPTION}pt; color: {theme.ON_SURFACE_MUTED}; "
-            f"font-weight: 700; letter-spacing: 1px; background: transparent;")
-        bar.addWidget(label)
-        self.preset_buttons = []
-        for i, (name, _, _) in enumerate(PRESETS):
-            btn = QPushButton(name)
-            btn.setMinimumHeight(32)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.clicked.connect(lambda _checked, idx=i: self._pick_preset(idx))
-            bar.addWidget(btn)
-            self.preset_buttons.append(btn)
+        # Two rows, not one: all eight buttons side by side would put the tab's
+        # minimum width near 1000 px, wider than the small screens the Pi runs.
+        camera_bar = QHBoxLayout()
+        camera_bar.setContentsMargins(14, 8, 14, 2)
+        camera_bar.setSpacing(8)
+        self.preset_buttons = self._button_group(
+            camera_bar, "VIEW", [name for name, _, _ in PRESETS],
+            self._pick_preset)
         reset = QPushButton("Reset")
         reset.setMinimumHeight(32)
         reset.setCursor(Qt.CursorShape.PointingHandCursor)
         reset.clicked.connect(self._reset)
-        bar.addWidget(reset)
-        bar.addStretch()
+        camera_bar.addWidget(reset)
+        camera_bar.addStretch()
+
+        arrow_bar = QHBoxLayout()
+        arrow_bar.setContentsMargins(14, 0, 14, 4)
+        arrow_bar.setSpacing(8)
+        self.data_buttons = self._button_group(
+            arrow_bar, "DATA", [sc.quantity for sc in DATA_SCALES],
+            self._pick_data)
+        arrow_bar.addSpacing(12)
+        self.show_buttons = self._button_group(
+            arrow_bar, "SHOW", ("Components", "Resultant"), self._pick_show)
+        arrow_bar.addStretch()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        root.addLayout(bar)
+        root.addLayout(camera_bar)
+        root.addLayout(arrow_bar)
         root.addWidget(self.view, 1)
 
-        self._highlight_preset(DEFAULT_PRESET)
-        self.view.preset_left.connect(lambda: self._highlight_preset(None))
+        _set_active(self.preset_buttons, DEFAULT_PRESET)
+        _set_active(self.data_buttons, 0)
+        _set_active(self.show_buttons, 0)
+        self.view.preset_left.connect(
+            lambda: _set_active(self.preset_buttons, None))
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._refresh)
         self.timer.start(REFRESH_MS)
 
+    @staticmethod
+    def _button_group(bar, title, names, on_pick):
+        """A captioned row of buttons of which exactly one is active."""
+        label = QLabel(title)
+        label.setStyleSheet(
+            f"font-size: {theme.FONT_CAPTION}pt; color: {theme.ON_SURFACE_MUTED}; "
+            f"font-weight: 700; letter-spacing: 1px; background: transparent;")
+        bar.addWidget(label)
+        buttons = []
+        for i, name in enumerate(names):
+            btn = QPushButton(name)
+            btn.setMinimumHeight(32)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda _checked, idx=i: on_pick(idx))
+            bar.addWidget(btn)
+            buttons.append(btn)
+        return buttons
+
     def _pick_preset(self, index):
         self.view.set_preset(index)
-        self._highlight_preset(index)
+        _set_active(self.preset_buttons, index)
+
+    def _pick_data(self, index):
+        """Force <-> moment. The camera and the mode toggle are unaffected."""
+        self.view.set_scale(DATA_SCALES[index])
+        _set_active(self.data_buttons, index)
+
+    def _pick_show(self, index):
+        """Component arrows <-> the single resultant arrow."""
+        self.view.set_resultant(index == 1)
+        _set_active(self.show_buttons, index)
 
     def _reset(self):
+        """Camera only -- which data the arrows show is a separate choice."""
         self.view.reset_view()
-        self._highlight_preset(DEFAULT_PRESET)
-
-    def _highlight_preset(self, index):
-        """Mark the active preset, or none of them once the user has orbited."""
-        for i, btn in enumerate(self.preset_buttons):
-            btn.setProperty("variant", "primary" if i == index else "")
-            btn.style().unpolish(btn)
-            btn.style().polish(btn)
+        _set_active(self.preset_buttons, DEFAULT_PRESET)
 
     def set_tooth_per_cell(self, tooth_per_cell):
         """Re-map which load cell drives each tooth, so a live sensor-config

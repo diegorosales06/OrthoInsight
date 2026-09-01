@@ -24,7 +24,7 @@ from typing import Optional
 from PyQt6.QtCore import QRectF
 from PyQt6.QtGui import QPainterPath
 
-from graphDash.constants import FORCE_COLORS, MOMENT_COLORS
+from graphDash.constants import FORCE_COLORS, MOMENT_COLORS, RESULTANT_COLOR
 from graphDash.ui.proj3d import vcross, vdot, vunit, vmad
 
 # Mandibular arch in Universal numbering, ordered left-to-right on screen
@@ -93,8 +93,23 @@ class AxisSpec:
 
 
 @dataclass(frozen=True)
+class ResultantSpec:
+    """The vector sum of a scale's three axes, drawn as one arrow.
+
+    It shares the scale's `lo` -- below that, nothing is drawn at all -- but
+    clamps at its own, larger `hi`: a resultant reaches up to sqrt(3) times a
+    single component, so reusing the component `hi` would peg it at full length
+    most of the time.
+    """
+    name: str          # "|F|"
+    color: str         # hex, from constants.RESULTANT_COLOR
+    description: str   # for the key
+    hi: float          # N or N*mm
+
+
+@dataclass(frozen=True)
 class GlyphScale:
-    """Maps one triple of readings onto three arrows.
+    """Maps one triple of readings onto three arrows, or onto their resultant.
 
     `axes` is ordered to match `Tooth.frame`, so axes[i] is drawn along the
     tooth's i-th basis vector. Magnitudes below `lo` draw nothing for that axis;
@@ -102,37 +117,47 @@ class GlyphScale:
     """
     lo: float          # N or N*mm
     hi: float          # N or N*mm
+    quantity: str      # "Force" / "Moment", for the view's header
     unit_label: str    # e.g. "Force (N)"
     axes: tuple        # three AxisSpec, in Tooth.frame order
+    resultant: ResultantSpec
 
     def frac(self, value) -> Optional[float]:
         """Position of |value| within [lo, hi] as 0.0-1.0, or None if below lo."""
+        return self._ramp(value, self.hi)
+
+    def resultant_frac(self, magnitude) -> Optional[float]:
+        """Same ramp, but clamped at the resultant's own, larger `hi`."""
+        return self._ramp(magnitude, self.resultant.hi)
+
+    def _ramp(self, value, hi) -> Optional[float]:
         m = abs(value)
         if m < self.lo:
             return None
-        if m >= self.hi:
+        if m >= hi:
             return 1.0
-        return (m - self.lo) / (self.hi - self.lo)
+        return (m - self.lo) / (hi - self.lo)
 
 
 # Reading order is constants.ALL_AXES = (Fx, Fy, Fz, Mx, My, Mz).
 FORCE_GLYPH = GlyphScale(
-    lo=0.25, hi=3.0, unit_label="Force (N)",
+    lo=0.25, hi=3.0, quantity="Force", unit_label="Force (N)",
     axes=(
         AxisSpec("Fx", 0, FORCE_COLORS[0], "mesio-distal"),
         AxisSpec("Fy", 1, FORCE_COLORS[1], "bucco-lingual"),
         AxisSpec("Fz", 2, FORCE_COLORS[2], "occlusal"),
     ),
+    resultant=ResultantSpec("|F|", RESULTANT_COLOR, "resultant force", hi=5.0),
 )
 
-# Kept for the moment layer this view will grow later; nothing draws it yet.
 MOMENT_GLYPH = GlyphScale(
-    lo=0.05, hi=75.0, unit_label="Moment (N·mm)",
+    lo=0.05, hi=75.0, quantity="Moment", unit_label="Moment (N·mm)",
     axes=(
         AxisSpec("Mx", 3, MOMENT_COLORS[0], "mesio-distal"),
         AxisSpec("My", 4, MOMENT_COLORS[1], "bucco-lingual"),
         AxisSpec("Mz", 5, MOMENT_COLORS[2], "occlusal"),
     ),
+    resultant=ResultantSpec("|M|", RESULTANT_COLOR, "resultant moment", hi=130.0),
 )
 
 

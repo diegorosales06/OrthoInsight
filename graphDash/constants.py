@@ -10,6 +10,9 @@ FORCE_AXES   = ("Fx", "Fy", "Fz")
 FORCE_COLORS = ("#1F77B4", "#2CA02C", "#D62728")  # blue, green, red
 MOMENT_AXES   = ("Mx", "My", "Mz")
 MOMENT_COLORS = ("#FF7F0E", "#9467BD", "#17BECF")  # orange, purple, cyan
+# Arch view only: the single vector-sum arrow drawn in place of the three
+# component arrows. Red regardless of whether force or moment is showing.
+RESULTANT_COLOR = "#D62728"
 ALL_AXES = FORCE_AXES + MOMENT_AXES
 N_AXES = 6
 
