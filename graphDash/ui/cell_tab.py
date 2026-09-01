@@ -1,5 +1,3 @@
-import numpy as np
-
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
 )
@@ -57,7 +55,6 @@ class CellTab(QWidget):
         self.store = store
         self.tare_offsets = tare_offsets
         self.window_s = DEFAULT_WINDOW_S
-        self.ma_n = 1
 
         layout = QVBoxLayout()
         layout.setContentsMargins(14, 14, 14, 14)
@@ -152,29 +149,21 @@ class CellTab(QWidget):
             f"offset: F[{o[0]:+.3f}, {o[1]:+.3f}, {o[2]:+.3f}]  "
             f"M[{o[3]:+.3f}, {o[4]:+.3f}, {o[5]:+.3f}]")
 
-    @staticmethod
-    def _moving_avg(arr, n):
-        """Causal moving average — output same length as input, no lookahead."""
-        if n <= 1 or len(arr) == 0:
-            return arr
-        kernel = np.ones(n) / n
-        smoothed = np.convolve(arr, kernel, mode="full")[:len(arr)]
-        cs = np.cumsum(arr)
-        for j in range(min(n - 1, len(arr))):
-            smoothed[j] = cs[j] / (j + 1)
-        return smoothed
-
     def refresh(self):
+        """Draw the stored samples as-is.
+
+        There is deliberately no smoothing here: the moving average runs
+        upstream in the sampler (graphDash/smoothing.py), so what is plotted is
+        byte-for-byte what was written to the CSV.
+        """
         t, arrs = self.store.get_cell(self.cell_idx, self.window_s)
         for i in range(3):
-            smoothed = self._moving_avg(arrs[i], self.ma_n)
-            self.force_curves[i].setData(t, smoothed)
-            if len(smoothed) > 0:
+            self.force_curves[i].setData(t, arrs[i])
+            if len(arrs[i]) > 0:
                 self.force_labels[i].setText(
-                    f"{FORCE_AXES[i]}: {smoothed[-1]:+7.3f} N")
+                    f"{FORCE_AXES[i]}: {arrs[i][-1]:+7.3f} N")
         for i in range(3):
-            smoothed = self._moving_avg(arrs[i+3], self.ma_n)
-            self.moment_curves[i].setData(t, smoothed)
-            if len(smoothed) > 0:
+            self.moment_curves[i].setData(t, arrs[i+3])
+            if len(arrs[i+3]) > 0:
                 self.moment_labels[i].setText(
-                    f"{MOMENT_AXES[i]}: {smoothed[-1]:+7.3f} N·mm")
+                    f"{MOMENT_AXES[i]}: {arrs[i+3][-1]:+7.3f} N·mm")

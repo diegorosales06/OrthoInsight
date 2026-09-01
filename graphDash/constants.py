@@ -17,3 +17,8 @@ DEFAULT_RATE_HZ    = 20
 DEFAULT_WINDOW_S   = 10
 REFRESH_MS         = 50
 MAX_BUFFER_SAMPLES = 5000
+
+# Moving-average window, in SECONDS (converted to a sample count using the live
+# sample rate). 0 = filter off.
+DEFAULT_SMOOTH_S   = 10
+MAX_SMOOTH_S       = 60

@@ -5,7 +5,9 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QActionGroup
 
-from graphDash.constants import DEFAULT_RATE_HZ, REFRESH_MS
+from graphDash.constants import (
+    DEFAULT_RATE_HZ, REFRESH_MS, DEFAULT_SMOOTH_S, MAX_SMOOTH_S,
+)
 from graphDash.ui import theme
 from graphDash.ui.cells_tab import CellsTab
 from graphDash.ui.sessions_tab import SessionsTab
@@ -75,7 +77,8 @@ class _CellTabBar(QTabBar):
 
 class Dashboard(QMainWindow):
     def __init__(self, sampler, store, n_cells, csv_logger=None, tooth_per_cell=None, pos_vectors=None,
-                 config_path=None, sensor_configs=None, tare_offsets=None):
+                 config_path=None, sensor_configs=None, tare_offsets=None,
+                 smoother=None):
         super().__init__()
         self.sampler = sampler
         self.store = store
@@ -83,6 +86,7 @@ class Dashboard(QMainWindow):
         self.tooth_per_cell = tooth_per_cell or []
         self.pos_vectors = pos_vectors
         self.tare_offsets = tare_offsets
+        self.smoother = smoother
         self.config_path = config_path
         self.sensor_configs = sensor_configs or []
         self.n_cells = n_cells
@@ -157,14 +161,20 @@ class Dashboard(QMainWindow):
         self.win_combo.currentIndexChanged.connect(self._window_changed)
         ctrl.addWidget(_labeled_control("WINDOW", self.win_combo))
 
-        # Moving average
+        # Moving average — window in seconds, applied upstream in the sampler
+        # (after tare, before compensation), not at draw time.
         self.ma_spin = QSpinBox()
-        self.ma_spin.setRange(1, 200)
-        self.ma_spin.setValue(1)
+        self.ma_spin.setRange(0, MAX_SMOOTH_S)
+        self.ma_spin.setValue(DEFAULT_SMOOTH_S)
+        self.ma_spin.setSuffix(" s")
         self.ma_spin.setMinimumWidth(80)
-        self.ma_spin.setToolTip("Moving average window in samples (1 = off)")
+        self.ma_spin.setToolTip(
+            "Moving average window in seconds (0 = off).\n"
+            "Converted to a sample count using the live sample rate, so the\n"
+            "window stays the same length in time when the rate changes.")
         self.ma_spin.valueChanged.connect(self._ma_changed)
         ctrl.addWidget(_labeled_control("SMOOTHING", self.ma_spin))
+        self._ma_changed(self.ma_spin.value())
 
         ctrl.addStretch()
 
@@ -285,6 +295,7 @@ class Dashboard(QMainWindow):
         if self.start_btn.isChecked():
             if self.csv_logger:
                 self.csv_logger.start_recording()
+            self._flush_smoother()
             self.sampler.running = True
             self.start_btn.setText("Stop Recording")
             self.start_btn.setProperty("variant", "danger")
@@ -306,6 +317,7 @@ class Dashboard(QMainWindow):
             self._set_status("idle")
 
     def _toggle_debug(self):
+        self._flush_smoother()
         self.sampler.simulate = self.debug_btn.isChecked()
         if self.sampler.simulate:
             self.debug_btn.setText("Debug Mode: ON")
@@ -324,11 +336,22 @@ class Dashboard(QMainWindow):
             t.window_s = ws
 
     def _ma_changed(self, val):
-        for t in self.cell_tabs:
-            t.ma_n = val
+        """Window size in seconds for the upstream filter."""
+        if self.smoother is not None:
+            self.smoother.window_s = val
 
     def _clear_data(self):
         self.store.clear()
+
+    def _flush_smoother(self):
+        """Drop the moving average's history.
+
+        Called at the discontinuities where averaging across the boundary would
+        smear a step into the data: starting a recording, switching between
+        real and simulated sensors, and taring.
+        """
+        if self.smoother is not None:
+            self.smoother.reset_all()
 
     def _tare_all(self):
         """Zero every cell at once, all from the same sampler cycle."""
@@ -339,6 +362,7 @@ class Dashboard(QMainWindow):
             self._flash("Tare needs live data — start recording first.", warning=True)
             return
         self.tare_offsets.set_all(snap)
+        self._flush_smoother()
         self._refresh_offset_labels()
         self._flash("✓ Tared all cells")
 
@@ -346,6 +370,7 @@ class Dashboard(QMainWindow):
         if self.tare_offsets is None:
             return
         self.tare_offsets.clear_all()
+        self._flush_smoother()
         self._refresh_offset_labels()
         self._flash("✓ Tare cleared")
 

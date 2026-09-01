@@ -11,7 +11,7 @@ class Sampler(threading.Thread):
     def __init__(self, cells, store, simulation_cells=None, simulate=False,
                  csv_logger=None, cell_names=None,
                  pos_vectors=None, cell_tooth_types=None,
-                 tare_offsets=None):
+                 tare_offsets=None, smoother=None):
         super().__init__()
         self.cells = cells
         self.simulation_cells = simulation_cells or []
@@ -22,6 +22,7 @@ class Sampler(threading.Thread):
         self.pos_vectors = pos_vectors
         self.cell_tooth_types = cell_tooth_types or []
         self.tare_offsets = tare_offsets
+        self.smoother = smoother
         self.rate_hz = DEFAULT_RATE_HZ
         self.running = False
         self._stop = False
@@ -40,6 +41,32 @@ class Sampler(threading.Thread):
         come from the same sampler cycle."""
         with self._last_raw_lock:
             return {ci: list(r) for ci, r in self._last_raw.items()}
+
+    def _process(self, cell_idx, raw):
+        """Run one cell's raw reading through the sample pipeline.
+
+            raw -> tare -> smooth -> compensate
+
+        Each stage is skipped when its collaborator was not supplied, so the
+        result is always a 6-axis reading. What this returns is exactly what
+        gets stored, plotted and logged -- nothing downstream processes it
+        further.
+        """
+        reading = raw
+        if self.tare_offsets is not None:
+            offset = self.tare_offsets.get(cell_idx)
+            reading = [reading[k] - offset[k] for k in range(N_AXES)]
+        if self.smoother is not None:
+            reading = self.smoother.update(cell_idx, reading, self.rate_hz)
+
+        tooth_type = (self.cell_tooth_types[cell_idx]
+                      if cell_idx < len(self.cell_tooth_types) else None)
+        if tooth_type and self.pos_vectors:
+            try:
+                return compute_adjusted(reading, tooth_type, self.pos_vectors)
+            except Exception:
+                return reading
+        return reading
 
     def run(self):
         while not self._stop:
@@ -64,21 +91,8 @@ class Sampler(threading.Thread):
                 for ci, r in enumerate(raw_readings):
                     self._last_raw[ci] = list(r)
 
-            readings = []
-            for ci, raw in enumerate(raw_readings):
-                if self.tare_offsets is not None:
-                    off = self.tare_offsets.get(ci)
-                    tared = [raw[k] - off[k] for k in range(N_AXES)]
-                else:
-                    tared = raw
-                tt = self.cell_tooth_types[ci] if ci < len(self.cell_tooth_types) else None
-                if tt and self.pos_vectors:
-                    try:
-                        readings.append(compute_adjusted(tared, tt, self.pos_vectors))
-                    except Exception:
-                        readings.append(tared)
-                else:
-                    readings.append(tared)
+            readings = [self._process(ci, raw)
+                        for ci, raw in enumerate(raw_readings)]
             self.store.append(t0, readings)
 
             if self.csv_logger:

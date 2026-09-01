@@ -137,11 +137,11 @@ def compute_adjusted(raw, tooth_type, pos_vectors):
    #ry=0.0082
    #rz = 0.014795
    #rz = 0.01789
-    print(f"{ry=}, {rz=}")
+    # print(f"{ry=}, {rz=}")
     # print(f"{fxo=}, {mxo=}, {rz=}, {ry=}")
 
     if abs(fyo) >= FORCE_THRESHOLD or abs(fzo) >= FORCE_THRESHOLD: # case 2 and 3
-        print("force case 2 and 3")
+        # print("force case 2 and 3")
         fz = (mxo + fyo*rz) / ry
         mxo = -fyo*rz + fz*ry
         # print(f"{fzo=}")
@@ -154,9 +154,9 @@ def compute_adjusted(raw, tooth_type, pos_vectors):
 
     if abs(fxo) >= FORCE_THRESHOLD:                       # case 1
         mz = mzo + fxo * ry
-        print("moment cast 1")
+        # print("moment cast 1")
     if abs(fzo) >= FORCE_THRESHOLD:                       # case 3
-        print("moment case 3")
+        # print("moment case 3")
         mx = mxo - fz * ry
 
     # print(f"{fxo=}, {fyo=}, {fzo=}, {mxo=}, {myo=}, {mzo=}")

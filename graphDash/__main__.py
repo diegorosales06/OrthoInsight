@@ -13,6 +13,7 @@ from graphDash.datastore import DataStore
 from graphDash.csv_logger import CSVLogger
 from graphDash.force_moment import PositionVectors, TareOffsets
 from graphDash.sampler import Sampler
+from graphDash.smoothing import MovingAverage
 from graphDash.ui.dashboard import Dashboard
 from graphDash.ui.startup_config import StartupConfigDialog
 
@@ -107,17 +108,18 @@ def main(argv=None):
 
     pos_vectors = PositionVectors()
     tare_offsets = TareOffsets(n_cells)
+    smoother = MovingAverage(n_cells)
 
     sampler = Sampler(cells, store, simulation_cells=simulation_cells, simulate=simulate,
                       csv_logger=csv_logger, cell_names=names,
                       pos_vectors=pos_vectors, cell_tooth_types=tooth_types,
-                      tare_offsets=tare_offsets)
+                      tare_offsets=tare_offsets, smoother=smoother)
     sampler.start()
 
     win = Dashboard(sampler, store, n_cells, csv_logger=csv_logger,
                     tooth_per_cell=teeth, pos_vectors=pos_vectors,
                     config_path=args.config, sensor_configs=sensor_configs,
-                    tare_offsets=tare_offsets)
+                    tare_offsets=tare_offsets, smoother=smoother)
     win.show()
 
     exit_code = app.exec()

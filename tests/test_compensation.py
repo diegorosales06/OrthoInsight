@@ -10,6 +10,13 @@ It exercises the *live* compute_adjusted() (imported below) against the
 central-incisor spreadsheet reference data. Measured values are the raw
 sensor readings; expected values are the spreadsheet's corrected outputs.
 
+Each measured row is pushed through the *live* MovingAverage first, exactly as
+Sampler.run() does (tare -> smooth -> compute_adjusted), so this harness
+exercises the real pipeline order rather than bypassing the filter. The rows
+are static, and a moving average of a constant is that same constant, so the
+filter is an identity here and the expected values are unchanged by it — see
+tests/test_smoothing.py, which is where the filter's own behaviour is checked.
+
 compute_adjusted() returns [Fx, Fy, Fz, Mx, My, Mz] — forces in N,
 moments in N*mm.
 """
@@ -22,10 +29,19 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from graphDash.force_moment import compute_adjusted, PositionVectors
+from graphDash.smoothing import MovingAverage
+from graphDash.constants import DEFAULT_SMOOTH_S, DEFAULT_RATE_HZ
 
 
 TOOTH_TYPE = "central_incisor"
 TOLERANCE = 0.1  # applied per component, in N and N*mm
+
+# Filter settings the pipeline runs with by default. FILL_SAMPLES is more than
+# SMOOTH_S * RATE_HZ, so each row is compensated with the filter's window
+# completely full — not part-way through its warm-up.
+SMOOTH_S = DEFAULT_SMOOTH_S
+RATE_HZ = DEFAULT_RATE_HZ
+FILL_SAMPLES = SMOOTH_S * RATE_HZ + 10
 
 TESTS = [
     # ==========================================================
@@ -93,6 +109,20 @@ TESTS = [
 LABELS = ["Fx", "Fy", "Fz", "Mx", "My", "Mz"]
 
 
+def filtered(measured):
+    """Run one measured row through the production moving average.
+
+    Mirrors the sampler: a fresh filter per case (as if reset_all() had just
+    fired), fed the row until the window is full, and the last output is what
+    compute_adjusted() gets.
+    """
+    ma = MovingAverage(1, window_s=SMOOTH_S)
+    out = measured
+    for _ in range(FILL_SAMPLES):
+        out = ma.update(0, measured, RATE_HZ)
+    return out
+
+
 def run_compensation_tests(pos_vectors=None):
     """Run every reference case and print a component-level breakdown.
 
@@ -106,10 +136,13 @@ def run_compensation_tests(pos_vectors=None):
 
     print("\n" + "=" * 100)
     print("CENTRAL INCISOR COMPENSATION TEST RESULTS")
+    print(f"(inputs pre-filtered: {SMOOTH_S}s moving average @ {RATE_HZ} Hz "
+          f"= {SMOOTH_S * RATE_HZ} samples)")
     print("=" * 100)
 
     for idx, test in enumerate(TESTS, start=1):
-        actual = compute_adjusted(test["measured"], TOOTH_TYPE, pos_vectors)
+        smoothed = filtered(test["measured"])
+        actual = compute_adjusted(smoothed, TOOTH_TYPE, pos_vectors)
 
         component_results = [
             abs(a - e) <= TOLERANCE
@@ -124,6 +157,7 @@ def run_compensation_tests(pos_vectors=None):
         print(f"Category : {test['category']}")
         print(f"Row      : {test['row']}")
         print(f"Measured : {test['measured']}")
+        print(f"Filtered : {[round(x, 6) for x in smoothed]}")
         print(f"Returned : {[round(x, 6) for x in actual]}")
         print(f"Expected : {test['expected']}")
         print(f"Result   : {'PASS' if test_pass else 'FAIL'}")
