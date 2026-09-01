@@ -14,6 +14,8 @@ Python dependencies are listed in `requirements.txt` (numpy, PyQt6, pyqtgraph, P
 sudo apt install python3-pyqt6 python3-pyqtgraph python3-numpy python3-yaml python3-spidev python3-gpiozero python3-lgpio
 ```
 
+**The 3D Arch View adds no dependencies** — it is Python stdlib (`math`, `dataclasses`, `functools`) plus `QPainter`, and deliberately uses **no** `PyOpenGL`, `pyqtgraph.opengl`, Qt3D, or QtQuick3D (and no numpy either). `PyOpenGL` is not in the apt line above, and pyqtgraph's GL widget on the Pi's Mesa/V3D driver is a risk the view doesn't need. Keep it that way: if a change to `proj3d.py` / `arch_model.py` / `arch_tab.py` seems to want a GL or array dependency, that is a signal the change is going the wrong way.
+
 Main dashboard (`graphDash.py`), the actively developed entry point:
 
 ```bash
@@ -25,15 +27,23 @@ python3 graphDash.py --config path/to/sensors.yaml
 
 `graphDash.py` is a thin shim that delegates to the `graphDash` package (`graphDash/__main__.py`).
 
-`--debug` mode works on any machine (spidev/gpiozero import failures are caught), so it's the way to iterate on UI/plotting/logging logic without a Pi. The dashboard also has a "Debug Mode" toggle button that flips `Sampler.simulate` at runtime. CSV logging and SQLite session tracking work in debug mode too — simulated recordings are stored just like real ones.
+`--debug` mode works on any machine (spidev/gpiozero import failures are caught), so it's the way to iterate on UI/plotting/logging logic without a Pi. On the current dev laptop the **system `python3` cannot run it** (no numpy, no pyqtgraph) — use the local `.venv/`, e.g. `.venv/bin/python graphDash.py --debug`. That venv is not committed (it self-ignores via its own `.venv/.gitignore` containing `*`), so it may simply not exist on a fresh clone; recreate it from `requirements.txt` rather than assuming a missing venv means something is broken. The dashboard also has a "Debug Mode" toggle button that flips `Sampler.simulate` at runtime. CSV logging and SQLite session tracking work in debug mode too — simulated recordings are stored just like real ones.
 
-There is no lint command configured — verify UI changes by running `graphDash.py --debug` and exercising the UI (actually launch the PyQt app and check the plots/controls). The force/moment compensation has a standalone test harness, run from the repo root:
+There is no lint command configured — verify UI changes by running `graphDash.py --debug` and exercising the UI (actually launch the PyQt app and check the plots/controls).
+
+For a view that is drawn rather than laid out (the Arch View), that check can be automated without a display: run under `QT_QPA_PLATFORM=offscreen`, build the widget against a stub store, and `widget.grab().save(path)` to get a PNG you can actually look at. Two techniques that paid off and are worth reusing:
+- **Pixel-diff against a baseline** to prove a refactor changed nothing. Beware the noise floor: with the sine-wave `DummySensor` the readings move between runs, so diff two runs of *identical* code first to learn what "unchanged" looks like — a static-value stub store diffs to zero, live simulated data does not.
+- **Sweep the camera** (a matrix of yaw/pitch values, each grabbed into one sheet) rather than eyeballing one angle. The fit-to-pane and face-culling bugs only showed up at the extremes.
+
+`arch_model.build_arch()` needs **no `QApplication`** — arch geometry (frames orthonormal and right-handed, normals outward, `GlyphScale.frac()` thresholds) is assertable in a plain Python process. The force/moment compensation has a standalone test harness, run from the repo root:
 
 ```bash
 python3 tests/test_compensation.py   # validates compute_adjusted() against reference data
 ```
 
 It imports the live `compute_adjusted()` and exits non-zero on failure. Importing `graphDash.force_moment` itself has no side effects.
+
+**As of 2026-08-26 this harness reports `6/8 TESTS PASSED` and exits 1** on `refactor/modular-graphdash` and its descendants — a pre-existing condition, not something a UI change caused. Confirm it against your base commit before assuming your work broke it.
 
 ## Architecture
 
@@ -125,6 +135,8 @@ Resolved by `graphDash/paths.py`:
 Note: the current `sensors.yaml` has all cells on the same `bus`/`dev`/`csb_gpio`, so they cannot be addressed individually — surface that to the user rather than silently rewiring, per the "confirm with the user" note above.
 
 The `tooth` field (optional) maps a sensor to a specific tooth in the lower dental arch using Universal numbering (17–32). This drives the Arch View tab. A cell with no `tooth`, or a `tooth` outside 17–32, simply never appears on the arch — that tooth stays a dashed outline.
+
+Note: as currently committed, **no cell in `sensors.yaml` maps to a lower-arch tooth** — one has `tooth: 3` (an upper-right molar, outside 17–32) and the rest have none — so the Arch View renders an empty arch and says so in its key column. That is correct behavior for the config, not a broken view. Ask the user which lower teeth the cells sit on rather than inventing numbers.
 
 The `tooth_type` field assigns a tooth category — `central_incisor`, `premolar`, or `molar` — which determines the default position vector `r = [rx, ry, rz]` (chiefly the default `rz`) used for force/moment override computations. It is schema-optional, but **a cell without one gets no compensation at all** (see "Sample pipeline"), so in practice every cell on the rig should have it set.
 
@@ -218,6 +230,8 @@ The `FORCE_THRESHOLD` is `0.3 N`.
   | `Fy` | bucco-lingual — the arch's outward normal; **+y = buccal/labial** |
   | `Fz` | occlusal — **+z = up, out of the tooth**; negative is intrusive |
 
+  The `Fz` direction is the user's stated convention. The **`Fx` sign has not been confirmed against the physical brackets** — it falls out of making the tooth frame right-handed, which points `+Fx` toward the patient's right at the anterior. If a known mesial load ever comes out pointing distally, flip the sign in `arch_model._crown()`; don't "fix" it speculatively.
+
   Arrow length (and pen width) grows linearly with |value| between the low and high thresholds, held in `GlyphScale`: **force 0.25 N → 3 N**. Below the low threshold **that axis draws nothing** (per-axis, not per-tooth); at or above the high threshold the arrow clamps and stops growing. So a longer arrow always means more force, and a missing arrow always means under-threshold. `MOMENT_GLYPH` (**0.05 → 75 N·mm**) is defined next to it but nothing draws it yet — the moment layer is deliberately deferred.
 
   **Camera.** `Oblique` / `Occlusal` / `Anterior` preset buttons plus free orbit (left-drag), wheel zoom (0.45×–4×), and double-click to reset. Orbiting off a preset switches the header to "Custom" and unhighlights the buttons (`ArchView3D.preset_left`). Pitch is clamped to **2°–89.5°** — always above the occlusal plane, because the renderer paints each crown's top face last on the assumption that it is the prism's near face. The camera sits `CAM_DISTANCE = 7.0` world units out (the arch spans ~2 × 1.3) so a near tooth can't approach the eye and explode under the perspective divide; the view fits the pane by **scaling the projected coordinates**, never by dollying, so a longer lens costs nothing.
@@ -228,7 +242,7 @@ The `FORCE_THRESHOLD` is `0.3 N`.
 
   **Visibility** is back-face culling (drop side quads whose outward normal faces away) plus a painter's-algorithm depth sort over crowns and arrows together. Two wrinkles worth knowing:
   - An arrow's depth key is **clamped to its own tooth's apex depth**, so an arrow can never be swallowed by the crown it grows out of — an intrusive `-Fz` points straight into the tooth body and would otherwise be invisible. Teeth nearer the camera still cover it.
-  - An arrow aimed close to the **view axis** has almost no projected length, so its shaft would lie about magnitude. Below `AXIAL_MIN_FRAC` of its face-on length it is replaced by a **ring glyph** sized by magnitude — filled dot = pointing toward the viewer, ✗ = away (the convention the old 2D view used for z). Rings are drawn in a final overlay pass because they mark their own tooth's occlusal surface.
+  - An arrow aimed close to the **view axis** has almost no projected length, so its shaft would lie about magnitude. Below `AXIAL_MIN_FRAC` of its face-on length it is replaced by a **ring glyph** sized by magnitude — filled dot = pointing toward the viewer, ✗ = away (the convention the old 2D view used for z). A ring marks its own tooth's occlusal surface, so nothing of that tooth may cover it — hence `OVERLAY_DEPTH` (see "Paint order").
 
   A fixed-width key column on the right documents the axis colors, the length scale, the ring glyphs, and a live `Fx Fy Fz` readout per instrumented tooth (arrows say which way; the numbers say how much).
 
