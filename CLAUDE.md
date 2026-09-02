@@ -16,7 +16,7 @@ sudo apt install python3-pyqt6 python3-pyqtgraph python3-numpy python3-yaml pyth
 
 **The 3D Arch View adds no runtime dependencies** — it is Python stdlib (`math`, `dataclasses`, `functools`, `json`, `array`) plus `QPainter`, and deliberately uses **no** `PyOpenGL`, `pyqtgraph.opengl`, Qt3D, or QtQuick3D (and no numpy either). `PyOpenGL` is not in the apt line above, and pyqtgraph's GL widget on the Pi's Mesa/V3D driver is a risk the view doesn't need. Keep it that way: if a change to `proj3d.py` / `arch_model.py` / `arch_tab.py` / `arch_asset.py` seems to want a GL or array dependency, that is a signal the change is going the wrong way.
 
-The arch's crowns are real scanned meshes, which is exactly why that rule still holds: **all the expensive work happens offline**. `tools/bake_arch_mesh.py` runs on a laptop with `trimesh` + `numpy` — loading STLs, cropping to crowns, decimating to a triangle budget, deriving each tooth's sensor frame — and writes `graphDash/assets/arch_mesh.{json,bin}`. The Pi only ever reads that file. Nothing under `graphDash/` imports the bake tool or its dependencies, and nothing should.
+The arch's crowns are real scanned meshes, which is exactly why that rule still holds: **all the expensive work happens offline**. `tools/bake_arch_mesh.py` runs on a laptop with `trimesh` + `numpy` — loading STLs, decimating to a triangle budget, deriving each tooth's sensor frame — and writes `graphDash/assets/arch_mesh.{json,bin}`. The Pi only ever reads that file. Nothing under `graphDash/` imports the bake tool or its dependencies, and nothing should.
 
 Main dashboard (`graphDash.py`), the actively developed entry point:
 

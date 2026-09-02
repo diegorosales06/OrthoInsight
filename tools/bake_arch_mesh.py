@@ -280,27 +280,7 @@ def load_and_orient(paths, manifest):
                        allv[:, 1].min(), allv[:, 2].min()])
     for m in meshes.values():
         m.vertices = (m.vertices - origin) * scale
-    return meshes, scale
-
-
-def crop_crowns(meshes, keep_mm_world):
-    """Slice each mesh to the occlusal `keep` height, discarding root and gum.
-
-    Scans of a model usually carry a base or gingiva; the view only ever shows
-    crowns, and every triangle below the gum line is budget spent on something
-    the camera can never see.
-    """
-    trimesh, np = need_trimesh()
-    out = {}
-    for number, m in meshes.items():
-        top = m.vertices[:, 2].max()
-        z = top - keep_mm_world
-        if m.vertices[:, 2].min() >= z:
-            out[number] = m
-            continue
-        sliced = m.slice_plane([0, 0, z], [0, 0, 1], cap=True)
-        out[number] = sliced if sliced is not None and not sliced.is_empty else m
-    return out
+    return meshes
 
 
 def arch_curve(centroids):
@@ -341,7 +321,7 @@ def build_teeth(meshes, budget, curve, unit, label_gap):
         if not m.is_watertight:
             print(f"    warning: tooth {number} is not closed after repair "
                   f"({len(m.faces)} faces) -- it may render see-through at some "
-                  f"angles. Try a different --crown-height.")
+                  f"angles. Check the scan for gaps at the gingival margin.")
 
         v = np.asarray(m.vertices, dtype=float)
         f = np.asarray(m.faces, dtype=int)
@@ -470,9 +450,6 @@ def main():
                     help="max triangles per crown after decimation (default 300; "
                          "take the real number from tests/bench_arch.py --scaling "
                          "run on the Pi)")
-    ap.add_argument("--crown-height", type=float, default=0.0,
-                    help="keep only this much of each mesh below its occlusal "
-                         "surface, in scan units (0 = no cropping)")
     ap.add_argument("--allow-missing", action="store_true",
                     help="bake even if some teeth have no mesh; they vanish "
                          "from the arch entirely rather than showing as a "
@@ -499,9 +476,7 @@ def main():
             "Supply the meshes, or pass --allow-missing to accept the gap.")
 
     trimesh, np = need_trimesh()
-    meshes, scale = load_and_orient(paths, manifest)
-    if args.crown_height:
-        meshes = crop_crowns(meshes, args.crown_height * scale)
+    meshes = load_and_orient(paths, manifest)
 
     centroids = [m.vertices.mean(axis=0) for _, m in sorted(meshes.items())]
     curve = arch_curve(centroids)

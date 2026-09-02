@@ -1,7 +1,7 @@
 """On-disk format for the baked arch mesh: reader, writer, and the spec itself.
 
 The Pi never sees an STL. `tools/bake_arch_mesh.py` does the expensive work --
-loading scans, cropping to crowns, decimating, deriving each tooth's sensor
+loading scans, decimating to a triangle budget, deriving each tooth's sensor
 frame -- on a laptop with trimesh and numpy, and writes the result here. The
 runtime then loads it with **stdlib only** (`json` + `array`), which is what
 keeps the Arch View free of the GL and array dependencies the Pi image doesn't
