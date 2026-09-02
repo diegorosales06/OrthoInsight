@@ -155,6 +155,12 @@ class GlyphScale:
     `axes` is ordered to match `Tooth.frame`, so axes[i] is drawn along the
     tooth's i-th basis vector. Magnitudes below `lo` draw nothing for that axis;
     magnitudes at or above `hi` clamp to the longest arrow.
+
+    `curl` says the quantity is a rotation *about* its axis rather than a push
+    along it, so the view draws a circular arrow encircling the axis instead of
+    a straight one along it. Moments curl; forces do not. It lives here, with
+    the rest of what a quantity means, rather than as an `is MOMENT_GLYPH` test
+    in the view.
     """
     lo: float          # N or N*mm
     hi: float          # N or N*mm
@@ -162,6 +168,7 @@ class GlyphScale:
     unit_label: str    # e.g. "Force (N)"
     axes: tuple        # three AxisSpec, in Tooth.frame order
     resultant: ResultantSpec
+    curl: bool = False # draw a rotation about the axis, not a push along it
 
     def frac(self, value) -> Optional[float]:
         """Position of |value| within [lo, hi] as 0.0-1.0, or None if below lo."""
@@ -199,6 +206,7 @@ MOMENT_GLYPH = GlyphScale(
         AxisSpec("Mz", 5, MOMENT_COLORS[2], "occlusal"),
     ),
     resultant=ResultantSpec("|M|", RESULTANT_COLOR, "resultant moment", hi=130.0),
+    curl=True,
 )
 
 

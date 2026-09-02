@@ -22,10 +22,18 @@ which the filenames already carry:
 
 That is robust in a way a principal-axis fit is not: PCA gives axes but not
 signs, and a sign error here silently points every force arrow the wrong way.
-The one thing numbering cannot settle is whether the scan is a mirror (a
-left-handed export flips z), so `--report` prints the handedness check and
-`arch_bake.json` carries a `flip_z` override. **Always look at the verification
-sheet before trusting a bake.**
+
+What numbering cannot settle is chirality: a mirrored export gives the same
+three axes with `+z` pointing into the roots. Nor can a determinant say so --
+`e_z` is `e_x x e_y`, so the basis is right-handed however the scan was written.
+The geometry is what tells you, and `--report` ends with the test: crowns are
+broader than roots, so the wide end must land at `+z`. If it does not,
+`arch_bake.json` carries two fixes that look identical from here --
+**`mirror_z`** reflects the scan (for a genuinely mirrored export; a rotation
+cannot undo a mirror) and **`flip_z`** turns it about `+y` (for LL/LR filenames
+that are swapped). Both are folded into the one transform in `load_and_orient`,
+before anything measures the mesh. **Always look at the verification sheet
+before trusting a bake.**
 """
 
 import argparse
@@ -185,11 +193,13 @@ def discover(stl_dir, overrides, scheme=None):
 
 # ---- orientation ----
 
-def world_transform(centroids, flip_z=False):
-    """A rotation taking the scan's frame to the app's, from tooth numbering.
+def world_transform(centroids, flip_z=False, mirror_z=False):
+    """The 3x3 taking the scan's frame to the app's, from tooth numbering.
 
-    Returns the 3x3 matrix whose rows are the world axes expressed in scan
-    coordinates, so `world = R @ scan`.
+    Returns the matrix whose rows are the world axes expressed in scan
+    coordinates, so `world = R @ scan`. With `mirror_z` it is a reflection
+    rather than a rotation, and `det` comes back negative to say so -- callers
+    have to reverse their triangle winding to match.
     """
     _, np = need_trimesh()
 
@@ -212,9 +222,18 @@ def world_transform(centroids, flip_z=False):
     e_y = e_y / np.linalg.norm(e_y)
     e_z = np.cross(e_x, e_y)
     if flip_z:
-        # A mirrored export makes the numbering-derived basis left-handed.
-        # Flipping x rather than z keeps z occlusal and preserves handedness.
+        # Not a mirror: a 180-degree turn about +y. Use it when the LL and LR
+        # *filenames* are swapped, which makes e_x point the wrong way along
+        # the arch and drags e_z apical with it. It keeps the geometry
+        # untouched and right-handed, and moves every tooth to the other side.
         e_x, e_z = -e_x, -e_z
+    if mirror_z:
+        # A genuine mirror, for a scan exported left-handed. No rotation can
+        # undo that -- rotating a mirrored arch back to crowns-up leaves the
+        # patient's left on the right -- so reflect instead, which is why this
+        # returns det < 0. Reflecting z alone keeps +x toward the patient's
+        # left and +y posterior, and only lifts the crowns.
+        e_z = -e_z
     return np.array([e_x, e_y, e_z])
 
 
@@ -265,10 +284,18 @@ def load_and_orient(paths, manifest):
         meshes[number] = m
 
     centroids = {n: m.centroid for n, m in meshes.items()}
-    R = world_transform(centroids, manifest.get("flip_z", False))
+    R = world_transform(centroids, manifest.get("flip_z", False),
+                        manifest.get("mirror_z", False))
+    mirrored = float(np.linalg.det(R)) < 0
 
     for m in meshes.values():
         m.vertices = m.vertices @ R.T
+        if mirrored:
+            # A reflection turns every triangle inside out. Reverse the winding
+            # here, at the transform, so that everything downstream -- the
+            # oriented boxes, the crown cut, `fix_normals`, the baked face
+            # normals the runtime culls on -- sees an outward-wound surface.
+            m.faces = np.ascontiguousarray(np.asarray(m.faces)[:, ::-1])
 
     # Centre on the arch, then scale so it spans the extent the view was tuned
     # for. Both are derived from the whole set, so the teeth keep their relative
@@ -398,7 +425,37 @@ def derive_unit(meshes):
     return unit
 
 
-def report(paths):
+def crowns_up(meshes):
+    """How many teeth have their wide end at +z, and how many at -z.
+
+    The determinant of `world_transform` cannot answer this: `e_z` is built as
+    `e_x x e_y`, so the basis is right-handed by construction whatever the scan
+    does. The geometry answers it instead -- a crown is broader than the root
+    below it, so the occlusal end is the end with the larger footprint. That is
+    a fact about teeth rather than about the export, which is what makes it a
+    test and not a restatement of the code above.
+    """
+    _, np = need_trimesh()
+    up = down = 0
+    for m in meshes.values():
+        v = np.asarray(m.vertices, dtype=float)
+        z = v[:, 2]
+        lo, hi = z.min(), z.max()
+        band = 0.15 * (hi - lo)
+
+        def footprint(sel):
+            p = v[sel]
+            return ((p[:, 0].max() - p[:, 0].min())
+                    * (p[:, 1].max() - p[:, 1].min()))
+
+        if footprint(z >= hi - band) >= footprint(z <= lo + band):
+            up += 1
+        else:
+            down += 1
+    return up, down
+
+
+def report(paths, manifest):
     """Print what the scans look like without deciding anything about them."""
     trimesh, np = need_trimesh()
     print("=" * 100)
@@ -421,15 +478,26 @@ def report(paths):
           "   (a missing tooth renders as a dashed footprint, which is fine "
           "for one that is genuinely absent)")
 
-    R = world_transform(centroids)
+    R = world_transform(centroids, manifest.get("flip_z", False),
+                        manifest.get("mirror_z", False))
     print("\nOrientation derived from the numbering (rows = world axes in scan coords):")
     for name, row in zip(("+x  right ", "+y  posterior", "+z  occlusal"), R):
         print(f"  {name}  [{row[0]:7.4f} {row[1]:7.4f} {row[2]:7.4f}]")
-    det = float(np.linalg.det(R))
-    print(f"\n  handedness det = {det:+.4f}  "
-          f"({'right-handed, as expected' if det > 0 else 'LEFT-HANDED: the scan is mirrored'})")
-    if det < 0:
-        print('  -> set "flip_z": true in tools/arch_bake.json and re-run --report')
+    oriented = {}
+    for number in centroids:
+        m = trimesh.load(paths[number], force="mesh")
+        m.vertices = m.vertices @ R.T
+        oriented[number] = m
+    up, down = crowns_up(oriented)
+    verdict = ("crowns occlusal, as expected" if up > down
+               else "CROWNS APICAL: +z points into the roots")
+    print(f"\n  crown check = {up} up / {down} down   ({verdict})")
+    if up <= down:
+        print('  -> a mirrored export: set "mirror_z": true in '
+              "tools/arch_bake.json and re-run --report.")
+        print("  -> the one thing that looks identical from here is LL and LR "
+              'filenames swapped, which wants "flip_z": true instead. Only you '
+              "know which the scan is.")
 
     pts = np.array([centroids[n] for n in centroids]) @ R.T
     print(f"\n  arch spans x {pts[:,0].min():.2f}..{pts[:,0].max():.2f}, "
@@ -465,7 +533,7 @@ def main():
 
     paths = discover(args.stl_dir, manifest.get("teeth", {}))
     if args.report:
-        return report(paths)
+        return report(paths, manifest)
 
     missing = [n for n in LOWER_ARCH_ORDER if n not in paths]
     if missing and not args.allow_missing:

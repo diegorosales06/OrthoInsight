@@ -5,14 +5,22 @@ owns the camera. This module is the view: it fits the arch to the pane, turns on
 frame's readings into depth-sorted primitives, paints them with QPainter, and
 wires up the camera controls.
 
-Two toggles pick what the arrows mean. DATA swaps the whole view between the
+Two toggles pick what the glyphs mean. DATA swaps the whole view between the
 force and the moment `GlyphScale`; SHOW swaps the three per-axis component
-arrows for a single red arrow along their vector sum, drawn in the same tooth
+glyphs for a single red one along their vector sum, drawn in the same tooth
 frame (`arch_model.ResultantSpec`, which carries its own larger `hi`).
 
-Arrow length is linear in |value| across the scale's [lo, hi]: below `lo` the
-axis draws nothing, at or above `hi` it clamps to the longest arrow. So a longer
-arrow is always more force, and an absent arrow always means "under threshold".
+A force is a push *along* an axis and is drawn as a straight arrow. A moment is
+a rotation *about* one, so it is drawn as a circular arrow encircling the axis,
+right-hand rule -- thumb along the signed axis, fingers following the arrow.
+Which of the two a scale gets is `GlyphScale.curl`, not a test against a
+particular scale object.
+
+Magnitude is linear in |value| across the scale's [lo, hi]: below `lo` the axis
+draws nothing, at or above `hi` it clamps. What grows differs with the glyph --
+a straight arrow gets longer, a curl sweeps further around its fixed-radius
+circle -- but in both cases more arrow is always more load, and an absent glyph
+always means "under threshold".
 
 No OpenGL -- the software pipeline behaves the same on the Pi as it does under
 `--debug` on a laptop. Visibility is back-face culling plus a painter's-algorithm
@@ -29,7 +37,9 @@ from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QFont, QPolygonF
 
 from graphDash.constants import REFRESH_MS
 from graphDash.ui import theme
-from graphDash.ui.proj3d import Camera, vdot, vnorm, vunit, vmad
+from graphDash.ui.proj3d import (
+    Camera, vcross, vdot, vmad, vnorm, vscale, vsub, vunit,
+)
 from graphDash.ui.arch_model import (
     build_arch, GlyphScale, FORCE_GLYPH, MOMENT_GLYPH,
     LOWER_ARCH_ORDER, TOOTH_TYPE, normalize_tooth,
@@ -67,6 +77,20 @@ RING_MAX_R     = 0.30
 # them last.
 OVERLAY_DEPTH  = float("-inf")
 
+# ---- curl geometry (moments: a rotation about an axis, not a push along it) ----
+# The circle's radius is fixed and its *sweep* ramps with magnitude. Keeping the
+# radius constant is what makes two teeth comparable at a glance -- every curl on
+# the arch is the same size, and only how far round it goes says how much. The
+# three components nest instead of sharing one circle, since all three encircle
+# the same apex: Mx innermost, Mz outermost, matching `Tooth.frame` order.
+CURL_RADII      = (0.34, 0.50, 0.66)    # multiples of `unit`, in Tooth.frame order
+CURL_RESULTANT_RANK = 1                 # the lone resultant borrows the middle radius
+CURL_MIN_SWEEP  = math.radians(70.0)
+CURL_MAX_SWEEP  = math.radians(320.0)   # short of a full turn, so the head stays
+                                        # clear of the tail and the sweep is readable
+CURL_HEAD_SWEEP = math.radians(30.0)
+CURL_STEP       = math.radians(9.0)     # polyline resolution of the arc
+
 # ---- camera ----
 # Presets: (name, yaw deg, pitch deg).
 PRESETS = (
@@ -89,6 +113,7 @@ ORBIT_SENS = 0.008       # rad per pixel of drag
 KEY_W = 204              # fixed pixel width of the painted key column
 KEY_ARROW_HEAD = 8.0     # px, for the key's flat sample arrows
 KEY_RING_R = 7.0
+KEY_CURL_R = 9.0         # px, for the key's flat sample curls
 TOP_PAD, BOTTOM_PAD, SIDE_PAD = 58, 22, 18
 
 # Directional light for crown shading, in world coordinates.
@@ -196,18 +221,13 @@ class _Frame:
 
 # ---- screen-space painting primitives (shared by the arch and its key) ----
 
-def _paint_arrow(p, tail: QPointF, neck: QPointF, tip: QPointF, color, width):
-    """Shaft from `tail` to `neck`, plus a head filling `neck` -> `tip`.
+def _paint_head(p, neck: QPointF, tip: QPointF, color, width):
+    """Filled arrowhead spanning `neck` -> `tip`, or a dot if they nearly meet.
 
-    Screen space only: the arch's 3D arrows project their three points first,
-    the key's flat sample arrows construct them directly.
+    Shared by the straight arrows and the curls -- the two differ only in what
+    leads up to the head, so an edge-on glyph of either kind degrades the same
+    way rather than in its own.
     """
-    pen = QPen(color, width)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    p.setPen(pen)
-    p.setBrush(Qt.BrushStyle.NoBrush)
-    p.drawLine(tail, neck)
-
     dx, dy = tip.x() - neck.x(), tip.y() - neck.y()
     seg = math.hypot(dx, dy)
     p.setPen(Qt.PenStyle.NoPen)
@@ -222,6 +242,52 @@ def _paint_arrow(p, tail: QPointF, neck: QPointF, tip: QPointF, color, width):
         QPointF(neck.x() + px * half, neck.y() + py * half),
         QPointF(neck.x() - px * half, neck.y() - py * half),
     ]))
+
+
+def _paint_arrow(p, tail: QPointF, neck: QPointF, tip: QPointF, color, width):
+    """Shaft from `tail` to `neck`, plus a head filling `neck` -> `tip`.
+
+    Screen space only: the arch's 3D arrows project their three points first,
+    the key's flat sample arrows construct them directly.
+    """
+    pen = QPen(color, width)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawLine(tail, neck)
+    _paint_head(p, neck, tip, color, width)
+
+
+def _paint_curl(p, points, tip: QPointF, color, width):
+    """Arc through `points`, with a head carrying it on to `tip`.
+
+    Screen space only, like `_paint_arrow`: the arch's 3D curls project their
+    arc first, the key's flat sample curls construct it directly.
+    """
+    pen = QPen(color, width)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawPolyline(QPolygonF(points))
+    _paint_head(p, points[-1], tip, color, width)
+
+
+def _curl_basis(axis, frame):
+    """Two unit vectors spanning the plane the curl's circle lies in.
+
+    Seeded from whichever of the tooth's own basis vectors is least aligned with
+    `axis`: for a component curl that is exactly one of the other two axes, and
+    for the resultant it is still tied to the tooth, so the circle keeps a
+    stable start point as the arch orbits rather than spinning with the camera.
+
+    `v = axis x u` makes the pair right-handed, which is what puts a positive
+    sweep on the right-hand-rule side of the axis -- curl the fingers the way the
+    arrow runs and the thumb points along `axis`.
+    """
+    seed = min(frame, key=lambda b: abs(vdot(b, axis)))
+    u = vunit(vsub(seed, vscale(axis, vdot(seed, axis))))
+    return u, vcross(axis, u)
 
 
 def _paint_ring(p, center: QPointF, r, color, width, toward):
@@ -394,32 +460,36 @@ class ArchView3D(QWidget):
 
             vals = readings.get(tooth.palmer)
             if vals is not None:
-                yield from self._arrow_primitives(frame, tooth, vals, apex_depth)
+                yield from self._glyph_primitives(frame, tooth, vals, apex_depth)
 
     def _glyph_vectors(self, tooth, vals):
-        """Yield (unit direction, 0-1 length fraction, color) for one tooth.
+        """Yield (unit axis, 0-1 magnitude fraction, color, rank) for one tooth.
 
         Component mode yields one entry per above-threshold axis, each along one
         of that tooth's own basis vectors. Resultant mode yields at most one,
         along the vector sum of the three components in that same frame -- so the
-        arrow points the way the tooth is actually being pushed (or twisted),
+        glyph follows the way the tooth is actually being pushed (or twisted),
         and clamps at the resultant's own larger `hi`.
+
+        `rank` is the axis's position in `Tooth.frame`, which the curls use to
+        nest their radii; the straight arrows share one origin and ignore it.
         """
         scale = self.scale
         if self.show_resultant:
             total = self._resultant_vector(tooth, vals)
             f = scale.resultant_frac(vnorm(total))
             if f is not None:
-                yield vunit(total), f, _qcolor(scale.resultant.color)
+                yield (vunit(total), f, _qcolor(scale.resultant.color),
+                       CURL_RESULTANT_RANK)
             return
-        for axis, basis in zip(scale.axes, tooth.frame):
+        for rank, (axis, basis) in enumerate(zip(scale.axes, tooth.frame)):
             value = vals[axis.index]
             f = scale.frac(value)
             if f is None:
                 continue
             direction = basis if value >= 0 \
                 else (-basis[0], -basis[1], -basis[2])
-            yield direction, f, _qcolor(axis.color)
+            yield direction, f, _qcolor(axis.color), rank
 
     def _resultant_vector(self, tooth, vals):
         """The three components summed in this tooth's own frame, as a world
@@ -430,18 +500,31 @@ class ArchView3D(QWidget):
             total = vmad(total, basis, vals[axis.index])
         return total
 
-    def _arrow_primitives(self, frame, tooth, vals, apex_depth):
+    def _glyph_primitives(self, frame, tooth, vals, apex_depth):
         """One primitive per glyph this tooth shows: its above-threshold
-        components, or the single resultant arrow.
+        components, or the single resultant.
 
-        An arrow's depth is clamped to its own tooth's apex so the crown it grows
+        A glyph's depth is clamped to its own tooth's apex so the crown it grows
         out of can never swallow it -- an intrusive -Fz points straight into the
-        tooth body. Teeth nearer the camera still cover it.
+        tooth body, and a curl encircles the crown, half of it behind. Teeth
+        nearer the camera still cover either.
+
+        Curls all sort at the same depth. `sorted` is stable and this yields in
+        `Tooth.frame` order, so the outermost circle lands on top of the ones it
+        rings, which is the order that reads.
         """
-        for direction, f, color in self._glyph_vectors(tooth, vals):
-            length = frame.unit * _lerp(ARROW_MIN_LEN, ARROW_MAX_LEN, f)
+        for direction, f, color, rank in self._glyph_vectors(tooth, vals):
             width = _lerp(ARROW_MIN_W, ARROW_MAX_W, f)
 
+            if self.scale.curl:
+                yield apex_depth - 1e-4, partial(
+                    self._draw_curl, frame=frame, tooth=tooth,
+                    direction=direction, radius=frame.unit * CURL_RADII[rank],
+                    sweep=_lerp(CURL_MIN_SWEEP, CURL_MAX_SWEEP, f),
+                    color=color, width=width)
+                continue
+
+            length = frame.unit * _lerp(ARROW_MIN_LEN, ARROW_MAX_LEN, f)
             tail = frame.point(vmad(tooth.apex, direction,
                                     frame.unit * ARROW_INSET))
             tip = frame.point(vmad(tooth.apex, direction, length))
@@ -467,6 +550,28 @@ class ArchView3D(QWidget):
             frame.point(vmad(origin, direction, max(inset, length - head))),
             frame.point(vmad(origin, direction, length)),
             color, width)
+
+    def _draw_curl(self, p, frame, tooth, direction, radius, sweep, color, width):
+        """A circular arrow encircling `direction`, centred on the tooth's apex.
+
+        The whole circle is projected, not approximated by an ellipse, so it
+        foreshortens correctly as the arch orbits -- and an axis lying in the
+        screen plane collapses its circle to a short stroke rather than to
+        nothing. That is the mirror of the straight arrows' failure case: an
+        arrow is worst aimed *at* the eye, a curl is best there, which is why the
+        ring substitution above has no counterpart here.
+        """
+        u, v = _curl_basis(direction, tooth.frame)
+
+        def at(angle):
+            return frame.point(vmad(vmad(tooth.apex, u, radius * math.cos(angle)),
+                                    v, radius * math.sin(angle)))
+
+        head = min(CURL_HEAD_SWEEP, sweep * 0.45)
+        shaft = sweep - head
+        steps = max(2, int(shaft / CURL_STEP) + 1)
+        _paint_curl(p, [at(shaft * i / steps) for i in range(steps + 1)],
+                    at(sweep), color, width)
 
     def _draw_footprint(self, p, frame, tooth):
         """A tooth with no cell mapped to it: a flat outline in the occlusal
@@ -578,9 +683,13 @@ class ArchView3D(QWidget):
         p.drawText(int(left), int(cur), scale.unit_label)
         cur += 20
 
-        # Which arrow is which: one row per axis, or the single resultant.
+        # Which glyph is which: one row per axis, or the single resultant.
         for spec in ((scale.resultant,) if resultant else scale.axes):
-            self._key_arrow(p, left, cur, 26, _qcolor(spec.color), 2.2)
+            if scale.curl:
+                self._key_curl(p, left, cur + 4, KEY_CURL_R,
+                               CURL_MAX_SWEEP * 0.7, _qcolor(spec.color), 2.2)
+            else:
+                self._key_arrow(p, left, cur, 26, _qcolor(spec.color), 2.2)
             p.setFont(caption)
             p.setPen(fg)
             p.drawText(int(left + 34), int(cur + 4), spec.name)
@@ -591,34 +700,49 @@ class ArchView3D(QWidget):
         cur += 4
         p.setFont(caption)
         p.setPen(muted)
-        p.drawText(int(left), int(cur), "Length")
+        p.drawText(int(left), int(cur), "Sweep" if scale.curl else "Length")
         cur += 14
-        for value, plen, width in ((scale.lo, 24, ARROW_MIN_W),
-                                   (hi, 58, ARROW_MAX_W)):
-            self._key_arrow(p, left, cur, plen, fg, width)
-            p.setFont(caption)
-            p.setPen(fg)
-            p.drawText(int(left + 64), int(cur + 4), f"{value:g}")
-            cur += 22
+        if scale.curl:
+            for value, sweep, width in ((scale.lo, CURL_MIN_SWEEP, ARROW_MIN_W),
+                                        (hi, CURL_MAX_SWEEP, ARROW_MAX_W)):
+                self._key_curl(p, left, cur + KEY_CURL_R, KEY_CURL_R, sweep,
+                               fg, width)
+                p.setFont(caption)
+                p.setPen(fg)
+                p.drawText(int(left + 34), int(cur + KEY_CURL_R + 4), f"{value:g}")
+                cur += 2 * KEY_CURL_R + 8
+        else:
+            for value, plen, width in ((scale.lo, 24, ARROW_MIN_W),
+                                       (hi, 58, ARROW_MAX_W)):
+                self._key_arrow(p, left, cur, plen, fg, width)
+                p.setFont(caption)
+                p.setPen(fg)
+                p.drawText(int(left + 64), int(cur + 4), f"{value:g}")
+                cur += 22
 
         # Ring glyph: what an arrow becomes when it aims along the view axis.
-        cur += 6
-        p.setFont(caption)
-        p.setPen(muted)
-        p.drawText(int(left), int(cur), "Along view axis")
-        cur += 16
-        for toward, text in ((True, "toward you"), (False, "away")):
-            _paint_ring(p, QPointF(left + 8, cur), KEY_RING_R, fg, 1.8, toward)
-            p.setPen(fg)
-            p.drawText(int(left + 24), int(cur + 4), text)
-            cur += 20
+        # A curl never becomes one -- that pose is the one it reads best in.
+        if not scale.curl:
+            cur += 6
+            p.setFont(caption)
+            p.setPen(muted)
+            p.drawText(int(left), int(cur), "Along view axis")
+            cur += 16
+            for toward, text in ((True, "toward you"), (False, "away")):
+                _paint_ring(p, QPointF(left + 8, cur), KEY_RING_R, fg, 1.8, toward)
+                p.setPen(fg)
+                p.drawText(int(left + 24), int(cur + 4), text)
+                cur += 20
 
         cur += 6
         p.setFont(note)
         p.setPen(muted)
-        for line in (f"< {scale.lo:g}: not shown", f"clamped at {hi:g}",
-                     "vector sum, tooth frame" if resultant
-                     else "each tooth's own frame"):
+        lines = [f"< {scale.lo:g}: not shown", f"clamped at {hi:g}",
+                 "vector sum, tooth frame" if resultant
+                 else "each tooth's own frame"]
+        if scale.curl:
+            lines += ["right-hand rule:", "thumb along the axis"]
+        for line in lines:
             p.drawText(int(left), int(cur), line)
             cur += 14
         cur += 8
@@ -676,6 +800,20 @@ class ArchView3D(QWidget):
         neck_x = x + length - KEY_ARROW_HEAD * 0.85
         _paint_arrow(p, QPointF(x, y), QPointF(neck_x, y),
                      QPointF(x + length, y), color, width)
+
+    @staticmethod
+    def _key_curl(p, x, y, r, sweep, color, width):
+        """Sample curl for the key: the same arc the arch draws, but face-on and
+        in the key's flat 2D space, centred at (x + r, y) and sweeping the same
+        way -- counter-clockwise on screen, as a curl about +view looks."""
+        def at(angle):
+            return QPointF(x + r + r * math.cos(angle), y - r * math.sin(angle))
+
+        head = min(CURL_HEAD_SWEEP, sweep * 0.45)
+        shaft = sweep - head
+        steps = max(2, int(shaft / CURL_STEP) + 1)
+        _paint_curl(p, [at(shaft * i / steps) for i in range(steps + 1)],
+                    at(sweep), color, width)
 
 
 def _set_active(buttons, index):
