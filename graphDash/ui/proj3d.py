@@ -101,9 +101,11 @@ class Camera:
     the projected coordinates, not by dollying the camera.
     """
 
-    # Stay above the occlusal plane: the arch view paints each crown's top face
-    # last on the assumption that it is the prism's near face, which only holds
-    # while the camera looks down on the plane.
+    # Stay above the occlusal plane. Crowns are depth-sorted per triangle, so
+    # this is no longer a correctness requirement the way it was when the view
+    # painted a prism's top face last -- but an arch is only ever read from the
+    # occlusal side, and edge-on the flat footprints of unmapped teeth collapse
+    # to lines.
     PITCH_MIN = math.radians(2.0)
     PITCH_MAX = math.radians(89.5)
 

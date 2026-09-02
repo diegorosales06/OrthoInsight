@@ -7,3 +7,7 @@ PyYAML
 # spidev
 # gpiozero
 # lgpio
+
+# Arch-mesh bake only (laptop, tools/bake_arch_mesh.py) — the Pi runtime reads
+# the baked asset with stdlib alone and must never import these:
+trimesh

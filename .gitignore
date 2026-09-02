@@ -1,2 +1,10 @@
 *.pyc
 __pycache__/
+
+# Source scans for the arch mesh. The baked asset in graphDash/assets/ is
+# committed; the STLs it was baked from are not — deploy.bat scp's the whole
+# tree, so a stray 200 MB scan would ship to the Pi.
+assets_src/
+*.stl
+*.ply
+*.obj

@@ -24,14 +24,20 @@ def _to_int(raw, default=0):
         return default
 
 
-def _to_int_or_none(raw):
-    text = "" if raw is None else str(raw).strip()
-    if not text:
-        return None
-    try:
-        return int(text)
-    except ValueError:
-        return None
+def _to_palmer_or_none(raw):
+    """A Palmer designation (`LL5`, `LR2`, ...) for the editor's Tooth cell.
+
+    Delegates to `arch_model.normalize_tooth`, which is also what the arch view
+    maps cells through -- so a value the editor accepts is exactly a value the
+    arch can draw, and there is no second opinion about which teeth exist. A
+    Universal number from a config written before the migration still parses.
+
+    Imported inside the function: `arch_model` still carries the retired
+    procedural geometry and its `QPainterPath` import with it, and loading a
+    sensor config should not require Qt.
+    """
+    from graphDash.ui.arch_model import normalize_tooth
+    return normalize_tooth(raw)
 
 
 @dataclass(frozen=True)
@@ -49,7 +55,7 @@ SENSOR_FIELDS = (
     SensorField("bus",        "Bus",        0,    False, "text",   _to_int),
     SensorField("dev",        "Dev",        0,    False, "text",   _to_int),
     SensorField("csb_gpio",   "CSB GPIO",   0,    False, "text",   _to_int),
-    SensorField("tooth",      "Tooth",      None, True,  "text",   _to_int_or_none),
+    SensorField("tooth",      "Tooth",      None, True,  "text",   _to_palmer_or_none),
     SensorField("tooth_type", "Tooth Type", None, True,  "choice", lambda r: r or None),
 )
 

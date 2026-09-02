@@ -18,6 +18,7 @@ drawn along:
 """
 
 import math
+import os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -25,31 +26,71 @@ from PyQt6.QtCore import QRectF
 from PyQt6.QtGui import QPainterPath
 
 from graphDash.constants import FORCE_COLORS, MOMENT_COLORS, RESULTANT_COLOR
+from graphDash.ui import arch_asset
 from graphDash.ui.proj3d import vcross, vdot, vunit, vmad
 
-# Mandibular arch in Universal numbering, ordered left-to-right on screen
-# (patient's right on viewer's left, standard occlusal-view convention).
-LOWER_ARCH_ORDER = [32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17]
+# Teeth are identified by their **Palmer** designation everywhere: in
+# `sensors.yaml`, in the arch view's labels, in the baked mesh asset, and in the
+# STL filenames the baker reads. One notation end to end means the label on
+# screen, the line in the config and the name of the scan file are the same
+# string, with nothing to translate and nothing to get backwards.
+#
+# `LL#` is the lower-left quadrant and `LR#` the lower-right, each numbered 1
+# (central incisor) outward to 8 (third molar). The mandibular arch has no other
+# teeth, so these sixteen are the whole vocabulary.
+#
+# Ordered left-to-right on screen -- the patient's right sits on the viewer's
+# left, the standard occlusal-view convention -- so the lower-right quadrant
+# comes first, counting inward.
+LOWER_ARCH_ORDER = ['LR8', 'LR7', 'LR6', 'LR5', 'LR4', 'LR3', 'LR2', 'LR1',
+                    'LL1', 'LL2', 'LL3', 'LL4', 'LL5', 'LL6', 'LL7', 'LL8']
 
 TOOTH_TYPE = {
-    17: 'molar',    18: 'molar',    19: 'molar',
-    20: 'premolar', 21: 'premolar',
-    22: 'canine',
-    23: 'incisor',  24: 'incisor',  25: 'incisor',  26: 'incisor',
-    27: 'canine',
-    28: 'premolar', 29: 'premolar',
-    30: 'molar',    31: 'molar',    32: 'molar',
+    'LR8': 'molar',    'LR7': 'molar',    'LR6': 'molar',
+    'LR5': 'premolar', 'LR4': 'premolar',
+    'LR3': 'canine',
+    'LR2': 'incisor',  'LR1': 'incisor',
+    'LL1': 'incisor',  'LL2': 'incisor',
+    'LL3': 'canine',
+    'LL4': 'premolar', 'LL5': 'premolar',
+    'LL6': 'molar',    'LL7': 'molar',    'LL8': 'molar',
 }
 
-# Display-only Palmer-notation labels (LL# = lower-left quadrant,
-# LR# = lower-right quadrant). Internal load-cell mapping still uses
-# the Universal numbers in TOOTH_TYPE / tooth_to_cell.
-PALMER_LABEL = {
+# Universal numbering was the identifier before the move to Palmer. Kept only so
+# a `sensors.yaml` or a mesh asset written back then still loads -- see
+# `normalize_tooth()`. Nothing writes Universal any more.
+_UNIVERSAL_TO_PALMER = {
     17: 'LL8', 18: 'LL7', 19: 'LL6', 20: 'LL5',
     21: 'LL4', 22: 'LL3', 23: 'LL2', 24: 'LL1',
     25: 'LR1', 26: 'LR2', 27: 'LR3', 28: 'LR4',
     29: 'LR5', 30: 'LR6', 31: 'LR7', 32: 'LR8',
 }
+
+
+def normalize_tooth(value):
+    """A Palmer designation for `value`, or None if it names no lower tooth.
+
+    The single gate every tooth identifier passes through, so config files, the
+    sensor-config editor and the mesh asset all agree on what counts. Accepts
+    any case and surrounding whitespace, and still understands a bare Universal
+    number from a config written before the migration.
+
+    Returns None rather than raising: an unset or upper-arch tooth is a normal
+    thing for a cell to have, and it simply never appears on the lower arch.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):           # bool is an int; nothing names a tooth
+        return None
+    if isinstance(value, int):
+        return _UNIVERSAL_TO_PALMER.get(value)
+
+    text = str(value).strip().upper().replace(" ", "")
+    if text in TOOTH_TYPE:
+        return text
+    if text.isdigit():                    # "31" from a pre-migration YAML
+        return _UNIVERSAL_TO_PALMER.get(int(text))
+    return None
 
 # (width_factor, depth_factor) relative to the arch's base unit. Width drives
 # both the drawn crown size AND its footprint along the arc (teeth are placed by
@@ -161,6 +202,42 @@ MOMENT_GLYPH = GlyphScale(
 )
 
 
+# ---- the retired procedural arch ----
+#
+# Prism geometry, kept only to regenerate the committed test fixture (see
+# `build_procedural_arch`). Nothing in the running view reaches this code.
+
+@dataclass(frozen=True)
+class _ProceduralTooth:
+    """A crown as an extruded prism: two outline rings and their side normals."""
+    palmer: str
+    ttype: str
+    center: tuple
+    frame: tuple
+    height: float
+    apex: tuple
+    base: tuple
+    top: tuple
+    normals: tuple
+    label_anchor: tuple
+
+    @property
+    def e_z(self):
+        return self.frame[2]
+
+    def edges(self):
+        """(i, j, outward_normal) for each side face of the prism."""
+        n = len(self.base)
+        return ((i, (i + 1) % n, self.normals[i]) for i in range(n))
+
+
+@dataclass(frozen=True)
+class _ProceduralArch:
+    teeth: tuple
+    unit: float
+    guide: tuple
+
+
 # ---- crown outlines ----
 
 def _tooth_path(ttype, w, d) -> QPainterPath:
@@ -250,26 +327,27 @@ def _point_at_arc(s_target, xs, ys, s_cum):
 
 @dataclass(frozen=True)
 class Tooth:
-    """One crown as an extruded prism, plus its local sensor frame."""
-    number: int
+    """One crown as a triangle mesh, plus its local sensor frame.
+
+    The mesh comes from a scan, baked to a fixed triangle budget by
+    `tools/bake_arch_mesh.py`; nothing here computes geometry. `verts` are world
+    points and `tris` are `(i, j, k, outward_normal)`, normals baked so the
+    renderer's per-frame back-face cull is a dot product and nothing more.
+    """
+    palmer: str            # Palmer designation, e.g. 'LR5' -- the tooth's identity
     ttype: str
-    center: tuple          # crown base center, world (z = 0)
+    center: tuple          # crown centre, world (z = 0)
     frame: tuple           # (e_x, e_y, e_z) unit vectors -- arrow directions
     height: float
     apex: tuple            # arrow origin: middle of the occlusal surface
-    base: tuple            # world ring at z = 0
-    top: tuple             # world ring at z = height
-    normals: tuple         # outward world normal per base edge
+    verts: tuple           # unique world vertices
+    tris: tuple            # (i, j, k, outward unit normal) per triangle
+    silhouette: tuple      # flat z = 0 outline, drawn when no cell is mapped
     label_anchor: tuple    # buccal of the crown, clear of the arrows
 
     @property
     def e_z(self):
         return self.frame[2]
-
-    def edges(self):
-        """(i, j, outward_normal) for each side face of the prism."""
-        n = len(self.base)
-        return ((i, (i + 1) % n, self.normals[i]) for i in range(n))
 
 
 @dataclass(frozen=True)
@@ -278,13 +356,17 @@ class Arch:
     teeth: tuple
     unit: float            # base size unit; all glyph geometry is a multiple
     guide: tuple           # occlusal-plane polyline through the crown centers
+    fit_hull: tuple        # the point set the view fits the pane to
 
     def vertices(self):
-        """Every crown vertex -- what the view fits the pane to. Arrows are
-        deliberately excluded, or the view would breathe as forces grew."""
-        for tooth in self.teeth:
-            yield from tooth.base
-            yield from tooth.top
+        """What the view fits the pane to.
+
+        A baked hull rather than every mesh vertex: the fit runs each frame and
+        a projected bounding box is decided entirely by extreme points, so the
+        interior of a crown can never move it. Arrows stay excluded, or the view
+        would breathe as forces grew.
+        """
+        return iter(self.fit_hull)
 
 
 def _crown(number, cx, cy, a, unit):
@@ -316,20 +398,20 @@ def _crown(number, cx, cy, a, unit):
             nrm = (-nrm[0], -nrm[1], -nrm[2])
         normals.append(nrm)
 
-    return Tooth(
-        number=number, ttype=ttype, center=center,
+    return _ProceduralTooth(
+        palmer=number, ttype=ttype, center=center,
         frame=(e_x, e_y, e_z), height=height, apex=(cx, cy, height),
         base=tuple(base), top=tuple(top), normals=tuple(normals),
         label_anchor=vmad(center, e_y, d * 0.5 + unit * 0.45),
     )
 
 
-def build_arch() -> Arch:
-    """Lay the whole lower arch out in world coordinates.
+def build_procedural_arch():
+    """The pre-mesh arch: 16 extruded prisms laid along a parabola.
 
-    Teeth are placed by cumulative arc length, which keeps them touching along
-    the curve regardless of the type mix, and sets the base `unit` that every
-    crown, arrow, and ring is sized from.
+    Retired from the view, kept only so `tools/make_synthetic_asset.py` can
+    regenerate the scan-free test fixture. Returns `_ProceduralTooth`s, not
+    `Tooth`s -- they carry rings and edges, not a mesh.
     """
     a = ARCH_DEPTH / (ARCH_HALF_WIDTH ** 2)
     xs, ys, s_cum = _parabola_arc(a, ARCH_HALF_WIDTH)
@@ -349,4 +431,35 @@ def build_arch() -> Arch:
         (-ARCH_HALF_WIDTH + i * step, a * (-ARCH_HALF_WIDTH + i * step) ** 2, 0.0)
         for i in range(GUIDE_SAMPLES)
     )
-    return Arch(teeth=tuple(teeth), unit=unit, guide=guide)
+    return _ProceduralArch(teeth=tuple(teeth), unit=unit, guide=guide)
+
+
+# ---- loading the baked mesh ----
+
+#: Asset base path, without extension. `.json` + `.bin` sit beside it.
+ASSET_BASE = os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), "assets", "arch_mesh")
+
+
+def build_arch(base=None) -> Arch:
+    """Load the baked arch mesh.
+
+    Static, so the view builds this once and never per frame. Stdlib only -- the
+    scan processing happened offline in `tools/bake_arch_mesh.py`, which is what
+    keeps this import free of numpy and of any GL dependency.
+
+    A missing or stale asset raises rather than falling back to anything: a
+    silent fallback is how a bad asset reaches the Pi unnoticed.
+    """
+    data = arch_asset.read_asset(ASSET_BASE if base is None else base)
+    teeth = tuple(
+        Tooth(
+            palmer=t["palmer"], ttype=t["ttype"], center=t["center"],
+            frame=t["frame"], height=t["height"], apex=t["apex"],
+            verts=t["verts"], tris=t["tris"], silhouette=t["silhouette"],
+            label_anchor=t["label_anchor"],
+        )
+        for t in data["teeth"]
+    )
+    return Arch(teeth=teeth, unit=data["unit"], guide=data["guide"],
+                fit_hull=data["fit_hull"])

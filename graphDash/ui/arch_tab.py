@@ -32,7 +32,7 @@ from graphDash.ui import theme
 from graphDash.ui.proj3d import Camera, vdot, vnorm, vunit, vmad
 from graphDash.ui.arch_model import (
     build_arch, GlyphScale, FORCE_GLYPH, MOMENT_GLYPH,
-    LOWER_ARCH_ORDER, PALMER_LABEL, TOOTH_TYPE,
+    LOWER_ARCH_ORDER, TOOTH_TYPE, normalize_tooth,
 )
 
 __all__ = ["ArchTab", "ArchView3D", "FORCE_GLYPH", "MOMENT_GLYPH",
@@ -92,6 +92,19 @@ KEY_RING_R = 7.0
 TOP_PAD, BOTTOM_PAD, SIDE_PAD = 58, 22, 18
 
 # Directional light for crown shading, in world coordinates.
+SHADE_LEVELS = 32       # quantised Lambert steps; see _shade_table
+
+# Antialias the crown fills? This is the biggest single performance lever in the
+# view, and it is a deliberate switch rather than a guess: measured on the dev
+# laptop with a fully instrumented arch (1088 triangles), turning it off takes
+# the marginal cost from 3.3 to 1.7 us per triangle -- which doubles the
+# triangle budget a Pi 4 can afford. What it costs is a slightly jagged crown
+# silhouette; everything else in the view (arrows, rings, labels, guide, key)
+# stays antialiased either way.
+#
+# Leave it on until `tests/bench_arch.py --scaling` on the actual Pi says
+# otherwise, then flip it here and re-bake at the larger budget.
+CROWN_ANTIALIAS = True
 LIGHT_DIR = vunit((0.35, -0.55, 0.78))
 
 
@@ -101,6 +114,26 @@ def _shade(color: QColor, f: float) -> QColor:
     return QColor(
         int(color.red() * t), int(color.green() * t), int(color.blue() * t)
     )
+
+
+def _shade_table(color: QColor):
+    """`SHADE_LEVELS` (pen, brush) pairs spanning the Lambert range.
+
+    Built once per view. Constructing a QColor, a QPen and a QBrush per triangle
+    per frame costs more than filling the triangle does; quantising the shade
+    instead makes crowns ~30% cheaper to paint. At 32 levels the step is about
+    three RGB units on the tooth fill, which is well below a visible band.
+
+    The pen matters as much as the brush: adjacent antialiased fills leave a
+    hairline of background along every shared edge, and a mesh has two orders of
+    magnitude more shared edges than the old prism did. Stroking each triangle
+    in its own fill colour closes those seams.
+    """
+    table = []
+    for level in range(SHADE_LEVELS):
+        c = _shade(color, level / (SHADE_LEVELS - 1))
+        table.append((QPen(c, 1.0), QBrush(c)))
+    return tuple(table)
 
 
 # ---- one frame's worth of projection ----
@@ -223,7 +256,7 @@ class ArchView3D(QWidget):
         self.scale = scale
         self.show_resultant = show_resultant
         self.arch = build_arch()
-        self._tooth_by_number = {t.number: t for t in self.arch.teeth}
+        self._tooth_by_palmer = {t.palmer: t for t in self.arch.teeth}
 
         ys = [t.center[1] for t in self.arch.teeth]
         self.camera = Camera(
@@ -234,6 +267,7 @@ class ArchView3D(QWidget):
         self._drag_pos = None
         self.set_preset(DEFAULT_PRESET)
 
+        self._shades = _shade_table(_qcolor(theme.TOOTH_FILL))
         self.setMinimumSize(460, 420)
         self.setCursor(Qt.CursorShape.OpenHandCursor)
 
@@ -305,17 +339,17 @@ class ArchView3D(QWidget):
     # ---- data ----
 
     def _readings(self):
-        """{tooth number: 6-axis reading} for every instrumented tooth.
+        """{Palmer designation: 6-axis reading} for every instrumented tooth.
 
         One store read per cell per frame, shared by the arrows and the key's
         numeric readout so the two can never show different samples.
         """
         latest = {}
-        for number, cell_idx in self.tooth_to_cell.items():
+        for palmer, cell_idx in self.tooth_to_cell.items():
             if cell_idx < self.store.n_cells:
                 vals = self.store.latest(cell_idx)
                 if vals is not None:
-                    latest[number] = vals
+                    latest[palmer] = vals
         return latest
 
     # ---- painting ----
@@ -353,12 +387,12 @@ class ArchView3D(QWidget):
         order: far things first, near things over them.
         """
         for tooth in self.arch.teeth:
-            mapped = tooth.number in self.tooth_to_cell
+            mapped = tooth.palmer in self.tooth_to_cell
             apex_depth = frame.depth(tooth.apex)
             draw = self._draw_crown if mapped else self._draw_footprint
             yield apex_depth, partial(draw, frame=frame, tooth=tooth)
 
-            vals = readings.get(tooth.number)
+            vals = readings.get(tooth.palmer)
             if vals is not None:
                 yield from self._arrow_primitives(frame, tooth, vals, apex_depth)
 
@@ -439,31 +473,47 @@ class ArchView3D(QWidget):
         plane, so the instrumented crowns are the only things standing up."""
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.setPen(QPen(_qcolor(theme.OUTLINE_STRONG), 1.1, Qt.PenStyle.DashLine))
-        p.drawPolygon(QPolygonF([frame.point(pt) for pt in tooth.base]))
+        p.drawPolygon(QPolygonF([frame.point(pt) for pt in tooth.silhouette]))
 
     def _draw_crown(self, p, frame, tooth):
-        """An instrumented tooth: the extruded prism plus its arrow origin."""
-        base = [frame.place(pt) for pt in tooth.base]
-        top = [frame.place(pt) for pt in tooth.top]
-        fill = _qcolor(theme.TOOTH_FILL)
+        """An instrumented tooth: its baked crown mesh plus its arrow origin.
 
-        # Sides: cull the faces pointing away, then paint the rest back-to-front.
-        quads = [
-            ((base[i][1] + base[j][1] + top[i][1] + top[j][1]) / 4,
-             i, j, max(0.0, vdot(nrm, LIGHT_DIR)))
-            for i, j, nrm in tooth.edges() if not frame.hidden(nrm)
+        Cull, sort, fill. The whole crown remains a *single* primitive in
+        `_primitives`, so triangles order among themselves here while crowns and
+        arrows keep ordering against each other outside -- which is what
+        preserves the arrow depth clamp.
+        """
+        # Project each vertex once. A welded mesh shares roughly three triangles
+        # per vertex, so projecting per corner instead would triple the frame's
+        # dominant cost.
+        pts = [frame.place(v) for v in tooth.verts]
+        fwd = frame.projector.fwd
+        top = SHADE_LEVELS - 1
+
+        # Sum of the three depths, not their mean: the sort only needs the
+        # ordering, and a division per triangle per frame is not free here.
+        faces = [
+            (pts[i][1] + pts[j][1] + pts[k][1], i, j, k,
+             int(max(0.0, vdot(nrm, LIGHT_DIR)) * top))
+            for i, j, k, nrm in tooth.tris if vdot(nrm, fwd) < 0.0
         ]
-        quads.sort(key=lambda q: -q[0])
-        p.setPen(Qt.PenStyle.NoPen)
-        for _, i, j, lam in quads:
-            p.setBrush(QBrush(_shade(fill, lam)))
-            p.drawPolygon(QPolygonF([base[i][0], base[j][0], top[j][0], top[i][0]]))
+        faces.sort(key=lambda f: -f[0])
 
-        # Occlusal face last: with the camera always above the plane (see
-        # Camera.PITCH_MIN) it is the nearest face of the prism.
-        p.setBrush(QBrush(_shade(fill, vdot(tooth.e_z, LIGHT_DIR))))
-        p.setPen(QPen(_qcolor(theme.OUTLINE_STRONG), 1.0))
-        p.drawPolygon(QPolygonF([sp for sp, _ in top]))
+        # Without antialiasing there are no partial-coverage pixels to leave a
+        # seam, so the seam-closing pen is pure cost and goes away with it.
+        if CROWN_ANTIALIAS:
+            for _, i, j, k, level in faces:
+                pen, brush = self._shades[level]
+                p.setPen(pen)
+                p.setBrush(brush)
+                p.drawPolygon(QPolygonF([pts[i][0], pts[j][0], pts[k][0]]))
+        else:
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            p.setPen(Qt.PenStyle.NoPen)
+            for _, i, j, k, level in faces:
+                p.setBrush(self._shades[level][1])
+                p.drawPolygon(QPolygonF([pts[i][0], pts[j][0], pts[k][0]]))
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         # Common origin of this tooth's three arrows.
         r = max(1.5, frame.unit * ORIGIN_DOT_R * frame.ppu)
@@ -483,9 +533,9 @@ class ArchView3D(QWidget):
         f.setPointSize(theme.FONT_CAPTION)
         f.setBold(True)
         p.setFont(f)
-        mapped = tooth.number in self.tooth_to_cell
+        mapped = tooth.palmer in self.tooth_to_cell
         p.setPen(_qcolor(theme.ON_SURFACE if mapped else theme.ON_SURFACE_SUBTLE))
-        text = PALMER_LABEL.get(tooth.number, str(tooth.number))
+        text = tooth.palmer
         sp = frame.point(tooth.label_anchor)
         fm = p.fontMetrics()
         p.drawText(QPointF(sp.x() - fm.horizontalAdvance(text) / 2,
@@ -585,12 +635,12 @@ class ArchView3D(QWidget):
         p.drawText(int(left), int(cur), "Live")
         cur += 14
         p.setFont(mono)
-        for number in sorted(self.tooth_to_cell, key=LOWER_ARCH_ORDER.index):
+        for palmer in sorted(self.tooth_to_cell, key=LOWER_ARCH_ORDER.index):
             if cur > h - 26:
                 break
             p.setPen(fg)
-            p.drawText(int(left), int(cur), PALMER_LABEL.get(number, str(number)))
-            vals = readings.get(number)
+            p.drawText(int(left), int(cur), palmer)
+            vals = readings.get(palmer)
             if vals is None:
                 p.setPen(_qcolor(theme.ON_SURFACE_SUBTLE))
                 p.drawText(int(left + 34), int(cur), "--")
@@ -598,7 +648,7 @@ class ArchView3D(QWidget):
                 # One magnitude, matching the one arrow that is drawn.
                 p.setPen(_qcolor(scale.resultant.color))
                 p.drawText(int(left + 34), int(cur),
-                           self._reading_text(self._magnitude(number, vals),
+                           self._reading_text(self._magnitude(palmer, vals),
                                               signed=False))
             else:
                 for i, axis in enumerate(scale.axes):
@@ -607,9 +657,9 @@ class ArchView3D(QWidget):
                                self._reading_text(vals[axis.index]))
             cur += 14
 
-    def _magnitude(self, number, vals):
+    def _magnitude(self, palmer, vals):
         """|resultant| for one tooth -- the same vector the arrow is drawn along."""
-        tooth = self._tooth_by_number.get(number)
+        tooth = self._tooth_by_palmer.get(palmer)
         return vnorm(self._resultant_vector(tooth, vals)) if tooth else 0.0
 
     @staticmethod
@@ -642,19 +692,15 @@ class ArchTab(QWidget):
 
     @staticmethod
     def _build_tooth_to_cell(tooth_per_cell):
-        """Universal tooth number -> cell index, for teeth on the lower arch.
+        """Palmer designation -> cell index, for teeth on the lower arch.
 
-        A cell with no `tooth`, or one outside 17-32, simply never appears."""
+        A cell with no `tooth`, or one naming an upper tooth, simply never
+        appears -- `normalize_tooth` is the single gate that decides which."""
         mapping = {}
         for cell_idx, tooth in enumerate(tooth_per_cell or []):
-            if tooth is None:
-                continue
-            try:
-                number = int(tooth)
-            except (TypeError, ValueError):
-                continue
-            if number in TOOTH_TYPE:
-                mapping[number] = cell_idx
+            palmer = normalize_tooth(tooth)
+            if palmer is not None:
+                mapping[palmer] = cell_idx
         return mapping
 
     def __init__(self, store, tooth_per_cell=None):

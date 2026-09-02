@@ -1,0 +1,14 @@
+{
+  "_comment": "Overrides for tools/bake_arch_mesh.py. Everything here is optional; the baker only needs it when filenames are ambiguous or the scan is mirrored.",
+
+  "_teeth": "Map a filename to a Palmer designation (LL1-LL8, LR1-LR8) when the name does not contain exactly one. Universal and FDI numbers are accepted here too and translated. Use null to skip a file -- that is what the combined-arch STL wants.",
+  "teeth": {},
+
+  "_numbering_example": {"upper_left_scan.stl": null, "tooth_a.stl": "LR6"},
+
+  "_flip_z": "Set true only if --report says the numbering-derived basis is LEFT-HANDED, which means the scan is a mirrored export.",
+  "flip_z": false,
+
+  "_scale": "Scan-units-to-world scale. Leave null to normalise the arch to the extent the view is tuned for; set it only to pin a bake against an earlier one.",
+  "scale": null
+}
