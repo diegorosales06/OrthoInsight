@@ -10,9 +10,16 @@ FORCE_AXES   = ("Fx", "Fy", "Fz")
 FORCE_COLORS = ("#1F77B4", "#2CA02C", "#D62728")  # blue, green, red
 MOMENT_AXES   = ("Mx", "My", "Mz")
 MOMENT_COLORS = ("#FF7F0E", "#9467BD", "#17BECF")  # orange, purple, cyan
-# Arch view only: the single vector-sum arrow drawn in place of the three
-# component arrows. Red regardless of whether force or moment is showing.
-RESULTANT_COLOR = "#D62728"
+# Arch view only: the single vector-sum arrow one tooth can show in place of its
+# three component arrows.
+#
+# It used to be the same red as Fz, which was harmless while the whole arch
+# showed either components or resultants. It no longer is: the toggles are
+# per-tooth, so one crown's resultant and its neighbour's Fz can be the only two
+# arrows on screen, and if both are red neither says which it is. Purple is the
+# remaining tab10 hue that is not a force colour -- moment reuses it for My, but
+# moment has no resultant, so the two never appear together.
+RESULTANT_COLOR = "#9467BD"
 ALL_AXES = FORCE_AXES + MOMENT_AXES
 N_AXES = 6
 

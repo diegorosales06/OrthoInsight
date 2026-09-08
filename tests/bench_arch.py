@@ -127,7 +127,9 @@ def main():
     worst_mean = 0.0
     rows = []
     for scale in DATA_SCALES:
-        for resultant in (False, True):
+        # Only force has a resultant; moment is timed as components only.
+        for resultant in ((False, True) if scale.resultant is not None
+                          else (False,)):
             view.set_scale(scale)
             view.set_resultant(resultant)
             for pi, (name, _, _) in enumerate(PRESETS):

@@ -187,17 +187,27 @@ for scale in (FORCE_GLYPH, MOMENT_GLYPH):
     check(f"{q}: past hi stays clamped", scale.frac(scale.hi * 10) == 1.0)
     check(f"{q}: sign does not change length",
           scale.frac(scale.hi / 2) == scale.frac(-scale.hi / 2))
-    check(f"{q}: resultant has a larger ceiling than one component",
-          scale.resultant.hi > scale.hi,
-          f"{scale.resultant.hi} > {scale.hi}")
-    check(f"{q}: resultant shares lo, so 'not shown' means the same thing",
-          scale.resultant_frac(scale.lo * 0.99) is None
-          and scale.resultant_frac(scale.lo) == 0.0)
-    check(f"{q}: three clamped components stay on the resultant ramp",
-          scale.resultant_frac(math.sqrt(3) * scale.hi) <= 1.0)
+    if scale.resultant is not None:
+        check(f"{q}: resultant has a larger ceiling than one component",
+              scale.resultant.hi > scale.hi,
+              f"{scale.resultant.hi} > {scale.hi}")
+        check(f"{q}: resultant shares lo, so 'not shown' means the same thing",
+              scale.resultant_frac(scale.lo * 0.99) is None
+              and scale.resultant_frac(scale.lo) == 0.0)
+        check(f"{q}: three clamped components stay on the resultant ramp",
+              scale.resultant_frac(math.sqrt(3) * scale.hi) <= 1.0)
+    else:
+        check(f"{q}: a scale with no resultant ramps nothing rather than raising",
+              scale.resultant_frac(scale.hi * 10) is None)
     check(f"{q}: axes carry three distinct reading indices",
           len({a.index for a in scale.axes}) == 3,
           f"{[a.index for a in scale.axes]}")
+
+# Which quantities offer a resultant at all is a product decision, not an
+# accident of the data: force does, moment does not, and the view, the toggle
+# panel and the key all gate on exactly this.
+check("force offers a resultant", FORCE_GLYPH.resultant is not None)
+check("moment offers components only", MOMENT_GLYPH.resultant is None)
 
 check("force and moment read disjoint halves of the sample",
       not ({a.index for a in FORCE_GLYPH.axes} & {a.index for a in MOMENT_GLYPH.axes}))

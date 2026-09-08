@@ -4,13 +4,22 @@
     QT_QPA_PLATFORM=offscreen python3 tests/render_arch.py --out /tmp/arch_after
     python3 tests/render_arch.py --diff /tmp/arch_before /tmp/arch_after
 
-Three things it produces:
+Four things it produces:
 
 * `presets_*.png`  -- one image per (data, show, camera preset) combination.
+  Only force has a resultant, so moment contributes component images only.
 * `sweep_*.png`    -- a yaw x pitch contact sheet. This is the one that earns its
   keep: fit-to-pane and face-culling bugs hide at the extremes of the camera
   range and are invisible at the default oblique view.
 * `edge_*.png`     -- the below-threshold / clamped / axial-ring readings.
+* `chrome_*.png`   -- the whole tab: the landscape key bar above the arch and the
+  toggle panel beside it, neither of which is inside the arch widget the other
+  images grab. `chrome_narrow.png` is the width at which the key stops fitting
+  beside the buttons and takes a row of its own.
+* `toggles_*.png`  -- the per-tooth glyph toggles, with the three mapped teeth
+  deliberately disagreeing: one on its resultant, one down to a single
+  component, one left alone. This is the image that proves `GlyphVisibility`
+  reaches the painter.
 
 `--diff` compares two directories pixel for pixel. The stub store is static, so
 two runs of unchanged code diff to exactly zero -- any non-zero count is a real
@@ -42,7 +51,9 @@ def render_presets(out_dir, size):
     view = harness.build_view(size=size)
     written = []
     for scale in DATA_SCALES:
-        for resultant in (False, True):
+        # A scale with no resultant (moment) gets the components pass only.
+        modes = (False, True) if scale.resultant is not None else (False,)
+        for resultant in modes:
             view.set_scale(scale)
             view.set_resultant(resultant)
             for pi, (name, _, _) in enumerate(PRESETS):
@@ -53,13 +64,19 @@ def render_presets(out_dir, size):
     return written
 
 
-def render_sweep(out_dir, size, tag="force_components", **kw):
-    """One contact sheet: rows of pitch, columns of yaw, all in a single PNG."""
+def render_sweep(out_dir, size, tag="force_components", setup=None, **kw):
+    """One contact sheet: rows of pitch, columns of yaw, all in a single PNG.
+
+    `setup` runs against the freshly built view, which is how a sheet gets a
+    non-default set of per-tooth toggles.
+    """
     import math
     from PyQt6.QtGui import QImage, QPainter
     from PyQt6.QtCore import QPointF
 
     view = harness.build_view(size=size, **kw)
+    if setup is not None:
+        setup(view)
     cw, ch = size
     sheet = QImage(cw * len(SWEEP_YAW), ch * len(SWEEP_PITCH),
                    QImage.Format.Format_ARGB32)
@@ -83,6 +100,58 @@ def render_edges(out_dir, size):
             scale=scale, size=size)
         written.append(_save(view.grab().toImage(),
                              os.path.join(out_dir, f"edge_{scale.quantity.lower()}.png")))
+    return written
+
+
+def mixed_toggles(view):
+    """Put the three mapped teeth into three different states.
+
+    LR7 shows its resultant only, LR2 is cut down to one component, LR5 is left
+    at the default all-three -- so one image says whether the toggles are read
+    per tooth or leak across the arch.
+    """
+    vis, quantity = view.visibility, view.scale.quantity
+    if view.scale.resultant is not None:
+        vis.set_resultant('LR7', quantity, True)
+    else:
+        vis.set_axis('LR7', quantity, 1, False)
+        vis.set_axis('LR7', quantity, 2, False)
+    for rank in (0, 1):
+        vis.set_axis('LR2', quantity, rank, False)
+    return view
+
+
+def render_chrome(out_dir, size):
+    """The whole tab: the key bar above the arch and the toggle panel beside it.
+
+    `render_presets` and the sweeps grab the arch widget alone, which no longer
+    contains any of the chrome -- so without this the key and the toggles would
+    be in no image at all.
+    """
+    from graphDash.ui.arch_tab import DATA_SCALES
+    written = []
+    for scale in DATA_SCALES:
+        tab = harness.build_tab(scale=scale, size=size)
+        written.append(_save(
+            tab.grab().toImage(),
+            os.path.join(out_dir, f"chrome_{scale.quantity.lower()}.png")))
+    # Narrow enough that the key cannot sit beside the buttons and takes a row
+    # of its own -- the case the Pi's screen actually hits.
+    tab = harness.build_tab(size=(820, 600))
+    written.append(_save(tab.grab().toImage(),
+                         os.path.join(out_dir, "chrome_narrow.png")))
+    return written
+
+
+def render_toggles(out_dir, size):
+    """One still per quantity with the teeth deliberately disagreeing."""
+    from graphDash.ui.arch_tab import DATA_SCALES
+    written = []
+    for scale in DATA_SCALES:
+        view = mixed_toggles(harness.build_view(scale=scale, size=size))
+        written.append(_save(
+            view.grab().toImage(),
+            os.path.join(out_dir, f"toggles_{scale.quantity.lower()}.png")))
     return written
 
 
@@ -144,9 +213,13 @@ def main():
     from graphDash.ui.arch_tab import MOMENT_GLYPH
     written = render_presets(args.out, size)
     written += render_edges(args.out, size)
+    written += render_toggles(args.out, size)
+    written += render_chrome(args.out, (1400, 700))
     written.append(render_sweep(args.out, sweep, "force_components"))
-    written.append(render_sweep(args.out, sweep, "moment_resultant",
-                                scale=MOMENT_GLYPH, show_resultant=True))
+    written.append(render_sweep(args.out, sweep, "moment_components",
+                                scale=MOMENT_GLYPH))
+    written.append(render_sweep(args.out, sweep, "force_mixed",
+                                setup=mixed_toggles))
     for path in written:
         print(f"  wrote {path}")
     print(f"\n{len(written)} images in {args.out}")

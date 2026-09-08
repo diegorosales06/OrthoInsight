@@ -90,6 +90,41 @@ def build_view(store=None, tooth_to_cell=None, scale=None, show_resultant=False,
     return view
 
 
+def build_tab(store=None, tooth_per_cell=None, scale=None, size=(1160, 640)):
+    """A whole `ArchTab` -- arch, key bar and toggle panel -- ready to `grab()`.
+
+    `build_view` renders the arch alone, which is the right unit for the camera
+    sweeps and the frame-time gate. This one exists because the chrome moved out
+    of the view: the key is a bar above it and the toggles a column beside it,
+    and neither appears in a `build_view` grab at all.
+
+    Themed, unlike `build_view`: the panel's buttons are QSS-styled, so an
+    unthemed grab would say nothing about what the user sees.
+    """
+    from PyQt6.QtWidgets import QApplication
+    application = app()
+    from graphDash.ui import theme
+    theme.apply(application)
+    from graphDash.ui.arch_tab import ArchTab
+
+    tab = ArchTab(store if store is not None else StubStore(),
+                  tooth_per_cell=['LR7', 'LR2', 'LR5'] if tooth_per_cell is None
+                  else tooth_per_cell)
+    if scale is not None:
+        tab._pick_data(list(_scales()).index(scale))
+    tab.resize(*size)
+    tab.show()
+    application.processEvents()
+    tab._refresh()                  # fills the panel's live numbers
+    application.processEvents()
+    return tab
+
+
+def _scales():
+    from graphDash.ui.arch_tab import DATA_SCALES
+    return DATA_SCALES
+
+
 def scene_polygons(view):
     """Polygons the scene would paint before back-face culling.
 

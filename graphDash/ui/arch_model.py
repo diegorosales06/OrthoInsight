@@ -161,13 +161,17 @@ class GlyphScale:
     a straight one along it. Moments curl; forces do not. It lives here, with
     the rest of what a quantity means, rather than as an `is MOMENT_GLYPH` test
     in the view.
+
+    `resultant` is `None` for a quantity that has no resultant at all -- not
+    merely one the view chooses to hide. `scale.resultant is None` is the single
+    gate the view, the toggle panel and the key all test.
     """
     lo: float          # N or N*mm
     hi: float          # N or N*mm
     quantity: str      # "Force" / "Moment", for the view's header
     unit_label: str    # e.g. "Force (N)"
     axes: tuple        # three AxisSpec, in Tooth.frame order
-    resultant: ResultantSpec
+    resultant: Optional[ResultantSpec] = None
     curl: bool = False # draw a rotation about the axis, not a push along it
 
     def frac(self, value) -> Optional[float]:
@@ -175,7 +179,13 @@ class GlyphScale:
         return self._ramp(value, self.hi)
 
     def resultant_frac(self, magnitude) -> Optional[float]:
-        """Same ramp, but clamped at the resultant's own, larger `hi`."""
+        """Same ramp, but clamped at the resultant's own, larger `hi`.
+
+        `None` for a scale with no resultant, so a stale caller draws nothing
+        rather than raising.
+        """
+        if self.resultant is None:
+            return None
         return self._ramp(magnitude, self.resultant.hi)
 
     def _ramp(self, value, hi) -> Optional[float]:
@@ -205,7 +215,10 @@ MOMENT_GLYPH = GlyphScale(
         AxisSpec("My", 4, MOMENT_COLORS[1], "bucco-lingual"),
         AxisSpec("Mz", 5, MOMENT_COLORS[2], "occlusal"),
     ),
-    resultant=ResultantSpec("|M|", RESULTANT_COLOR, "resultant moment", hi=130.0),
+    # No resultant. Summing three moments about three axes gives a vector whose
+    # magnitude is not a quantity anyone reads off a bracket, so the moment view
+    # offers its components and nothing else -- and the toggle panel has no
+    # resultant column at all in this mode.
     curl=True,
 )
 
