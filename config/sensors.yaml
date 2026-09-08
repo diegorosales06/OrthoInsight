@@ -1,19 +1,23 @@
 sensors:
-- name: incisor
+- name: ll8
   bus: 0
   dev: 0
   csb_gpio: 0
-  tooth: LR7
+  tooth: LL8
   tooth_type: central_incisor
-- name: premolar
+- name: Cell 2
   bus: 0
   dev: 0
   csb_gpio: 0
-  tooth: LR2
-  tooth_type: premolar
-- name: molar
+  tooth: LR8
+- name: Cell 3
   bus: 0
   dev: 0
   csb_gpio: 0
-  tooth: LR5
-  tooth_type: molar
+  tooth: LL1
+- name: Cell 3
+  bus: 0
+  dev: 0
+  csb_gpio: 0
+  tooth: LL4
+

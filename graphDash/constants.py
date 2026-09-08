@@ -23,5 +23,5 @@ MAX_BUFFER_SAMPLES = 5000
 
 # Moving-average window, in SECONDS (converted to a sample count using the live
 # sample rate). 0 = filter off.
-DEFAULT_SMOOTH_S   = 10
+DEFAULT_SMOOTH_S   = 1
 MAX_SMOOTH_S       = 60

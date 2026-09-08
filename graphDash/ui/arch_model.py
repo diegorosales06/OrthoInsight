@@ -199,7 +199,7 @@ FORCE_GLYPH = GlyphScale(
 )
 
 MOMENT_GLYPH = GlyphScale(
-    lo=0.05, hi=75.0, quantity="Moment", unit_label="Moment (N·mm)",
+    lo=0.1, hi=75.0, quantity="Moment", unit_label="Moment (N·mm)",
     axes=(
         AxisSpec("Mx", 3, MOMENT_COLORS[0], "mesio-distal"),
         AxisSpec("My", 4, MOMENT_COLORS[1], "bucco-lingual"),

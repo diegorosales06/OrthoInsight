@@ -59,7 +59,7 @@ def _lerp(a, b, t):
 
 # ---- glyph geometry (lengths are multiples of the arch's `unit`; widths px) ----
 ARROW_MIN_LEN  = 0.60
-ARROW_MAX_LEN  = 1.95
+ARROW_MAX_LEN  = 1.6
 ARROW_HEAD_LEN = 0.30
 ARROW_MIN_W    = 1.6
 ARROW_MAX_W    = 3.4

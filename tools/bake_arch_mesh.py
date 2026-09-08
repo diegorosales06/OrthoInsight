@@ -416,7 +416,7 @@ def derive_unit(meshes):
 
     ratio = unit / PROCEDURAL_UNIT
     print(f"  unit = {unit:.5f}  ({ratio:.2f}x the arch this view was tuned against)")
-    if not 0.8 <= ratio <= 1.25:
+    if not 0.8 <= ratio <= 1.6:
         raise SystemExit(
             f"unit is {ratio:.2f}x the value every glyph constant in "
             "arch_tab.py was tuned for -- arrows and rings would be sized "

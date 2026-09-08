@@ -12,7 +12,7 @@
   "mirror_z": false,
 
   "_flip_z": "The LL and LR filenames are swapped. A 180-degree turn about +y, which leaves the geometry untouched and moves every tooth to the other side of the arch. Use this one when the scan is fine and only the naming is wrong.",
-  "flip_z": false,
+  "flip_z": true,
 
   "_scale": "Scan-units-to-world scale. Leave null to normalise the arch to the extent the view is tuned for; set it only to pin a bake against an earlier one.",
   "scale": null
