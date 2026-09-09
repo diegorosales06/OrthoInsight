@@ -23,7 +23,8 @@ import arch_harness as harness           # sets QT_QPA_PLATFORM, fixes sys.path
 
 from PyQt6.QtCore import QPointF, Qt
 
-from graphDash.ui.arch_tab import PRESETS, ZOOM_MIN, ZOOM_MAX, CLICK_SLOP
+from graphDash.ui.arch_tab import (
+    PRESETS, ZOOM_MIN, ZOOM_MAX, CLICK_SLOP, _crown_depth_at)
 
 # `build_view` maps these three, the mix `config/sensors.yaml` carries.
 MAPPED = ("LR7", "LR2", "LR5")
@@ -60,16 +61,6 @@ class _Event:
         return self._button
 
 
-def screen_of(view, frame):
-    """World -> (x, y, depth) floats, the way `tooth_at` projects."""
-    pr, sc, cx, cy = frame.projector, frame.scale_px, frame.cx, frame.cy
-
-    def screen(pt):
-        u, v, depth = pr.project(pt)
-        return cx + sc * u, cy - sc * v, depth
-    return screen
-
-
 # ---- 1. a mapped tooth's apex picks that tooth, or one in front of it ----
 
 def test_apex_picks_its_tooth(view):
@@ -78,7 +69,6 @@ def test_apex_picks_its_tooth(view):
         for zoom in (ZOOM_MIN, 1.0, ZOOM_MAX):
             view.zoom = zoom
             frame = view._frame()
-            screen = screen_of(view, frame)
             for palmer in MAPPED:
                 tooth = view._tooth_by_palmer[palmer]
                 pos = frame.point(tooth.apex)
@@ -94,11 +84,9 @@ def test_apex_picks_its_tooth(view):
                 if got is None:
                     check(f"{where} -> None (expected a crown)", False)
                     continue
-                mine = view._crown_depth_at(
-                    screen, frame.projector.fwd, tooth, pos.x(), pos.y())
-                theirs = view._crown_depth_at(
-                    screen, frame.projector.fwd, view._tooth_by_palmer[got],
-                    pos.x(), pos.y())
+                mine = _crown_depth_at(frame, tooth, pos.x(), pos.y())
+                theirs = _crown_depth_at(
+                    frame, view._tooth_by_palmer[got], pos.x(), pos.y())
                 check(f"{where} -> {got}, which is nearer",
                       theirs is not None and mine is not None
                       and theirs <= mine)
@@ -151,15 +139,14 @@ def test_bbox_soundness(view):
         for pitch in (88.0, 60.0, 30.0, 5.0):
             view.camera.set_orientation(math.radians(yaw), math.radians(pitch))
             frame = view._frame()
-            screen = screen_of(view, frame)
             for tooth in view.arch.teeth:
-                box = [screen(c) for c in view._tooth_box[tooth.palmer]]
+                box = [frame.place_xy(c) for c in tooth.box]
                 x0 = min(c[0] for c in box)
                 x1 = max(c[0] for c in box)
                 y0 = min(c[1] for c in box)
                 y1 = max(c[1] for c in box)
                 for v in tooth.verts:
-                    x, y, _ = screen(v)
+                    x, y, _ = frame.place_xy(v)
                     tested += 1
                     if not (x0 - 1e-6 <= x <= x1 + 1e-6
                             and y0 - 1e-6 <= y <= y1 + 1e-6):
