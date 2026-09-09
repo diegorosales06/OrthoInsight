@@ -253,6 +253,7 @@ class Dashboard(QMainWindow):
         self._cell_selection_changed(0)
         self.arch_tab = ArchTab(store, tooth_per_cell=self.tooth_per_cell)
         self.tabs.addTab(self.arch_tab, "Arch View")
+        self.arch_tab.cell_picked.connect(self._show_cell)
         if self.pos_vectors:
             self.pos_vector_tab = PositionVectorTab(self.pos_vectors)
             self.tabs.addTab(self.pos_vector_tab, "Position Vector")
@@ -268,6 +269,22 @@ class Dashboard(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._refresh)
         self.timer.start(REFRESH_MS)
+
+    def _show_cell(self, idx):
+        """Bring one cell's graphs to the front -- where the Arch View's crowns go.
+
+        `CellsTab.select` is a no-op when that cell is already showing, and being
+        a no-op it emits nothing, so raising the tab cannot be left to
+        `selection_changed`. It happens here, unconditionally, and *after* the
+        stack has been pointed at the right cell, so the tab is never briefly
+        showing the cell the user was last looking at. When the select is a
+        no-op the labels are already right: `_cell_selection_changed` is their
+        only writer and it ran the last time the index changed.
+        """
+        if not 0 <= idx < len(self.cells_tab.names):
+            return
+        self.cells_tab.select(idx)
+        self.tabs.setCurrentIndex(self.cells_index)
 
     def _cell_selection_changed(self, idx):
         """Keep the tab label and its dropdown in sync with the visible cell."""

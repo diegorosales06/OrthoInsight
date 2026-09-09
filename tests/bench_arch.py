@@ -37,6 +37,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import arch_harness as harness           # sets QT_QPA_PLATFORM, fixes sys.path
 
+from PyQt6.QtCore import QPointF
+
 from graphDash.constants import REFRESH_MS
 from graphDash.ui.arch_model import LOWER_ARCH_ORDER
 from graphDash.ui.arch_tab import DATA_SCALES, PANEL_SCROLL_W, PRESETS
@@ -151,6 +153,60 @@ def scaling(frames, size):
     return 0
 
 
+def picking(frames, size):
+    """Cost of one `ArchView3D.tooth_at()` call, over a growing mapped set.
+
+    Picking runs on a mouse event, never on the frame tick, so this is not part
+    of the gate the way `time_tab_ticks` is -- but a click that took longer than
+    a frame would stall the timer it interrupts, and the hover test runs the same
+    predicate per mouse-move. Both numbers are reported: the cursor over empty
+    canvas is the ~99% case and should stay in the cheap reject stage, while a
+    cursor over a crown pays for the exact stage on one tooth.
+
+    Run it on the Pi 4, like everything else here.
+    """
+    print("=" * 100)
+    print(f"Arch View pick cost  --  {size[0]}x{size[1]}, {frames} picks/case")
+    print(f"budget: one pick well under {REFRESH_MS} ms, so a click cannot "
+          f"stall a tick")
+    print("=" * 100)
+    print(f"\n{'mapped teeth':>13} {'on a crown':>14} {'empty canvas':>14}")
+    print("-" * 100)
+    worst = 0.0
+    for k in SCALING_STEPS:
+        if k == 0:
+            continue
+        vals = [1.4, -0.8, 2.1, 22.0, -48.0, 9.0]
+        store = harness.StubStore({i: vals for i in range(k)}, n_cells=k)
+        mapping = {t: i for i, t in enumerate(LOWER_ARCH_ORDER[:k])}
+        view = harness.build_view(store=store, size=size, tooth_to_cell=mapping)
+        view.grab()
+        frame = view._frame()
+        on = frame.point(view._tooth_by_palmer[LOWER_ARCH_ORDER[0]].apex)
+        off = QPointF(4.0, 4.0)
+        hit = miss = 0.0
+        for pos, acc in ((on, "hit"), (off, "miss")):
+            t0 = time.perf_counter()
+            for _ in range(frames):
+                view.tooth_at(pos)
+            ms = (time.perf_counter() - t0) * 1000.0 / frames
+            if acc == "hit":
+                hit = ms
+            else:
+                miss = ms
+        worst = max(worst, hit)
+        print(f"{k:13d} {hit:12.3f}ms {miss:12.3f}ms")
+
+    print("\n" + "-" * 100)
+    ok = worst < REFRESH_MS
+    print(f"worst pick: {worst:.3f} ms vs {REFRESH_MS} ms frame  --  "
+          f"{'PASS' if ok else 'FAIL'}")
+    print("\nA dev laptop is roughly an order of magnitude faster than the Pi 4;")
+    print("re-run this there before trusting it.")
+    print("=" * 100)
+    return 0 if ok else 1
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--frames", type=int, default=40,
@@ -159,11 +215,15 @@ def main():
                     help="widget size, WxH (default 900x620)")
     ap.add_argument("--scaling", action="store_true",
                     help="measure cost per triangle and report the bake budget")
+    ap.add_argument("--pick", action="store_true",
+                    help="measure the cost of one tooth_at() hit test")
     args = ap.parse_args()
     w, h = (int(v) for v in args.size.lower().split("x"))
 
     if args.scaling:
         return scaling(args.frames, (w, h))
+    if args.pick:
+        return picking(max(args.frames, 20), (w, h))
 
     view = harness.build_view(size=(w, h))
     polys = harness.scene_polygons(view)

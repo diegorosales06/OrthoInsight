@@ -127,6 +127,17 @@ FIT_MARGIN = 0.86        # leaves room for arrows, which are not fitted
 ZOOM_MIN, ZOOM_MAX = 0.45, 4.0
 ORBIT_SENS = 0.008       # rad per pixel of drag
 
+# ---- picking ----
+# Clicking a crown opens that cell's graphs, so a press/release has to be told
+# apart from an orbit. Sized for a fingertip rather than a mouse: the Pi's
+# screen is touch, and Qt synthesises mouse events from it.
+CLICK_SLOP = 6           # px of travel below which a press/release is a click
+HOVER_STEP = 3           # px of travel below which the hover test is skipped
+# Documented lever, like CROWN_ANTIALIAS below. Off means the click still works
+# and the cursor simply stays an open hand -- the first thing to turn off if a
+# Pi measurement of `tooth_at` ever comes up short.
+PICK_HOVER = True
+
 # ---- chrome ----
 # The key is a landscape bar across the top of the tab, beside the camera and
 # DATA buttons -- not a column down the side of the view. That is what leaves
@@ -184,6 +195,31 @@ def _shade_table(color: QColor):
         c = _shade(color, level / (SHADE_LEVELS - 1))
         table.append((QPen(c, 1.0), QBrush(c)))
     return tuple(table)
+
+
+def _box_corners(verts):
+    """The eight corners of a world-space AABB around `verts`.
+
+    The cheap first stage of the hit test projects these and rejects any click
+    outside their screen bounding box. That reject is *sound*, not just fast:
+    every mesh point is in front of the eye (`Projector.project` clamps depth
+    positive) and a perspective map sends a convex body to a convex image, so
+    the projected corners' bounding box contains every projected vertex of the
+    crown. A click the box misses cannot be on the crown.
+
+    Measured against the shipped asset over 20 camera poses: 0 escapes out of
+    192,640 projected vertices. `tests/test_arch_pick.py` keeps checking it,
+    because a tighter bound here would be an unsound one.
+    """
+    xs = [v[0] for v in verts]
+    ys = [v[1] for v in verts]
+    zs = [v[2] for v in verts]
+    return tuple(
+        (x, y, z)
+        for x in (min(xs), max(xs))
+        for y in (min(ys), max(ys))
+        for z in (min(zs), max(zs))
+    )
 
 
 # ---- one frame's worth of projection ----
@@ -432,6 +468,14 @@ class ArchView3D(QWidget):
     #: Emitted when a mouse orbit moves the camera off the selected preset.
     preset_left = pyqtSignal()
 
+    #: Emitted when a click lands on a mapped crown. The payload is the *cell
+    #: index* that crown's sensor writes to, not the Palmer designation: the
+    #: view already owns `tooth_to_cell` and the hit test consults it to decide
+    #: what is clickable at all, so resolving the index in the same breath from
+    #: the same dict makes it impossible for the tab that opens to be for a
+    #: different cell than the click tested against.
+    tooth_picked = pyqtSignal(int)
+
     def __init__(self, store, tooth_to_cell: dict, scale: GlyphScale,
                  visibility=None):
         super().__init__()
@@ -454,7 +498,15 @@ class ArchView3D(QWidget):
         )
         self.zoom = 1.0
         self._drag_pos = None
+        self._press_pos = None    # see mousePressEvent: NOT _drag_pos
+        self._dragged = False
+        self._hover = None        # Palmer under the pointer, or None
+        self._hover_tested = None
+        self._frame_memo = None   # see _frame()
         self._pending = None      # see take_readings()
+        # World-space AABB corners per crown, for the hit test's cheap stage.
+        # Asset-derived, so a live config edit never has to rebuild it.
+        self._tooth_box = {t.palmer: _box_corners(t.verts) for t in self.arch.teeth}
         self.set_preset(DEFAULT_PRESET)
 
         self._shades = _shade_table(_qcolor(theme.TOOTH_FILL))
@@ -465,6 +517,9 @@ class ArchView3D(QWidget):
         # fit-scaled into whatever it gets.
         self.setMinimumSize(360, 260)
         self.setCursor(Qt.CursorShape.OpenHandCursor)
+        # Without this `mouseMoveEvent` is only delivered with a button down, so
+        # the hover cursor would never appear.
+        self.setMouseTracking(True)
 
     # ---- what the arrows mean ----
 
@@ -500,12 +555,34 @@ class ArchView3D(QWidget):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_pos = event.position()
+            # A *second* position, because `_drag_pos` is overwritten on every
+            # move -- the orbit is incremental -- so at release it holds the last
+            # mouse step, not the travel since the press. A slow orbit of a pixel
+            # per event would otherwise end up reading as a click.
+            self._press_pos = event.position()
+            self._dragged = False
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
 
     def mouseMoveEvent(self, event):
-        if self._drag_pos is None:
-            return
         pos = event.position()
+        if self._drag_pos is None:
+            if PICK_HOVER:
+                self._update_hover(pos)
+            return
+        if not self._dragged:
+            if (abs(pos.x() - self._press_pos.x()) <= CLICK_SLOP
+                    and abs(pos.y() - self._press_pos.y()) <= CLICK_SLOP):
+                # Dead zone. This suppresses the *orbit*, not just the click
+                # classification: the emit below fires on any non-zero delta, so
+                # without it a click with two pixels of hand wobble would knock
+                # the camera off its preset and unhighlight the VIEW button.
+                return
+            # Latched, not recomputed at release: someone who orbits 200 px away
+            # and comes back near the press point has moved the camera, and that
+            # must not also select a tooth.
+            self._dragged = True
+            self._drag_pos = pos
+            return
         dx = pos.x() - self._drag_pos.x()
         dy = pos.y() - self._drag_pos.y()
         self._drag_pos = pos
@@ -517,11 +594,46 @@ class ArchView3D(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, event):
-        self._drag_pos = None
-        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        press, dragged = self._press_pos, self._dragged
+        self._drag_pos = self._press_pos = None
+        self._dragged = False
+        # `clear_hover`, not just the cursor: the pointer may still be over the
+        # crown it was over before the press, and leaving `_hover` set would make
+        # the next move a no-op -- so the hand would stay closed-then-open until
+        # the pointer left the tooth and came back.
+        self.clear_hover()
+        if press is None or dragged \
+                or event.button() != Qt.MouseButton.LeftButton:
+            return
+        palmer = self.tooth_at(press)
+        cell = self.tooth_to_cell.get(palmer) if palmer is not None else None
+        if cell is not None:
+            # Last statement, after every local is cleared: the connected slot
+            # raises another tab, which hides this widget while its own event
+            # handler is still on the stack.
+            self.tooth_picked.emit(cell)
 
     def mouseDoubleClickEvent(self, event):
+        """Reset the camera -- unless the double-click landed on a crown.
+
+        Qt delivers Press, Release, DblClick, Release, and the double-click does
+        not pass through `mousePressEvent`. So the first release already fired at
+        most one select and cleared `_press_pos`, and the second release finds it
+        None and fires nothing: at most one select per double-click, by
+        construction, with no doubleClickInterval timer putting dead air on the
+        primary interaction.
+
+        What is left is that a double-click on a crown would both open its graph
+        and reset the camera of a tab the user has just left -- a surprise on
+        their next visit. Fix that here, in the reset, rather than in the select.
+        """
+        if event.button() == Qt.MouseButton.LeftButton \
+                and self.tooth_at(event.position()) is not None:
+            return
         self.reset_view()
+
+    def leaveEvent(self, event):
+        self.clear_hover()
 
     def wheelEvent(self, event):
         steps = event.angleDelta().y() / 120.0
@@ -597,6 +709,167 @@ class ArchView3D(QWidget):
                     latest[palmer] = vals
         return latest
 
+    # ---- where the arch lands on screen ----
+
+    def _view_rect(self) -> QRectF:
+        """The pane the arch is fitted into.
+
+        The whole widget is the arch: the key is a bar above this widget and the
+        toggles a column beside it, so nothing is reserved here.
+
+        Shared by the paint and the pick deliberately. If the two ever computed
+        this separately and drifted, every click would land a few pixels off the
+        crown it looks like it hit, and nothing on screen would say so.
+        """
+        w, h = self.width(), self.height()
+        return QRectF(SIDE_PAD, TOP_PAD,
+                      max(60, w - 2 * SIDE_PAD), max(60, h - TOP_PAD - BOTTOM_PAD))
+
+    def _frame(self) -> "_Frame":
+        """The world -> screen mapping for the current camera pose.
+
+        Rebuilt rather than cached from the last paint. `_Frame.fit` is a pure
+        function of (arch, camera, zoom, rect) -- all widget state that outlives
+        any one frame -- so this keeps the rule that no frame state is parked on
+        the widget. A cached painted frame would have six writers to invalidate
+        (orbit, wheel, resize, set_preset, reset_view, first show), and a missed
+        one is a silent few-pixel offset that shows up only as "sometimes it
+        picks the neighbouring tooth". It would also be *absent* in the case that
+        matters most -- a click arriving before a freshly shown tab's first paint.
+
+        What is parked is a memo of that pure function, because `fit` projects
+        the 2410-point fit hull (0.8 ms here, ~8 ms on a Pi) and the hover test
+        calls this per mouse-move. The memo also takes that cost off every idle
+        repaint, since a still camera keeps the key constant.
+
+        The invariant: **anything `_Frame.fit` reads must appear in the key.**
+        """
+        cam = self.camera
+        key = (cam.yaw, cam.pitch, cam.target, cam.distance,
+               self.zoom, self.width(), self.height())
+        if self._frame_memo is None or self._frame_memo[0] != key:
+            self._frame_memo = (
+                key, _Frame.fit(self.arch, cam, self.zoom, self._view_rect()))
+        return self._frame_memo[1]
+
+    # ---- picking ----
+
+    def tooth_at(self, pos: QPointF):
+        """Palmer designation of the mapped crown under `pos`, or None.
+
+        Runs the same projection, the same back-face cull and the same triangles
+        `_draw_crown` paints, so what you can click is by construction what you
+        can see. Two stages: a sound screen-bbox reject (see `_box_corners`),
+        then an exact point-in-triangle over the survivors, nearest depth wins --
+        so an occluded crown loses to the one in front of it.
+
+        Unmapped teeth are skipped before either stage, using the very membership
+        test the painter uses to choose `_draw_crown` over `_draw_footprint`. One
+        dict, one test: the clickable set cannot disagree with what is drawn.
+
+        Costs nothing on the frame tick -- this runs only on a mouse event.
+        """
+        frame = self._frame()
+        pr, sc, cx, cy = frame.projector, frame.scale_px, frame.cx, frame.cy
+        px, py = pos.x(), pos.y()
+
+        def screen(pt):
+            """World point -> (x, y, depth) as plain floats.
+
+            `_Frame.place` builds a QPointF; there are 602 of these per crown,
+            so the pick skips the object.
+            """
+            u, v, depth = pr.project(pt)
+            return cx + sc * u, cy - sc * v, depth
+
+        best, best_depth = None, None
+        for tooth in self.arch.teeth:
+            if tooth.palmer not in self.tooth_to_cell:
+                continue          # a dashed footprint: no cell, so no target
+            box = [screen(c) for c in self._tooth_box[tooth.palmer]]
+            if not (min(c[0] for c in box) <= px <= max(c[0] for c in box)
+                    and min(c[1] for c in box) <= py <= max(c[1] for c in box)):
+                continue
+            depth = self._crown_depth_at(screen, pr.fwd, tooth, px, py)
+            if depth is not None and (best_depth is None or depth < best_depth):
+                best, best_depth = tooth.palmer, depth
+        return best
+
+    @staticmethod
+    def _crown_depth_at(screen, fwd, tooth, px, py):
+        """Depth of the nearest front-facing triangle of `tooth` under (px, py).
+
+        The cull is `_draw_crown`'s cull: a triangle you cannot see must not be a
+        triangle you can click. Vertices are projected once each, as they are
+        there, rather than once per triangle corner.
+
+        The depth is interpolated screen-space linearly rather than
+        perspective-correctly. At CAM_DISTANCE = 7.0 for a crown ~0.27 world
+        units tall that is off by a fraction of a crown's thickness, and it is
+        only ever used to order *overlapping crowns* -- the same job the
+        painter's own sort does.
+        """
+        pts = [screen(v) for v in tooth.verts]
+        best = None
+        for i, j, k, nrm in tooth.tris:
+            if vdot(nrm, fwd) >= 0.0:
+                continue
+            ax, ay, ad = pts[i]
+            bx, by, bd = pts[j]
+            cx2, cy2, cd = pts[k]
+            v0x, v0y = bx - ax, by - ay
+            v1x, v1y = cx2 - ax, cy2 - ay
+            den = v0x * v1y - v1x * v0y
+            if den == 0.0:
+                continue                      # edge-on sliver
+            qx, qy = px - ax, py - ay
+            a = (qx * v1y - v1x * qy) / den
+            if a < 0.0 or a > 1.0:
+                continue
+            b = (v0x * qy - qx * v0y) / den
+            if b < 0.0 or a + b > 1.0:
+                continue
+            d = ad + a * (bd - ad) + b * (cd - ad)
+            if best is None or d < best:
+                best = d
+        return best
+
+    def clear_hover(self):
+        """Forget what the pointer was over and drop the pointing hand.
+
+        Needed when the clickable set changes under a stationary pointer -- a
+        config edit that unmaps a crown must not leave the hand hovering over a
+        footprint until the mouse next moves.
+        """
+        self._hover = self._hover_tested = None
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+
+    def _update_hover(self, pos):
+        """Point the cursor at whatever is clickable under `pos`.
+
+        Runs the *same* `tooth_at` predicate as the click, not a cheaper one: a
+        crown's projected bbox is noticeably larger than the crown and overlaps
+        its neighbour, so a pointing hand over the bbox alone would promise a
+        click that does nothing.
+
+        It is affordable because stage 1 rejects. Cursor over empty canvas or a
+        footprint costs 0.02 ms here (~0.2 ms on a Pi) -- that is the ~99% case.
+        Only a pointer actually inside a crown's bbox reaches the exact stage,
+        and HOVER_STEP caps how often that can happen during a sweep. Nothing
+        repaints: the cursor is the whole affordance.
+        """
+        last = self._hover_tested
+        if last is not None and abs(pos.x() - last.x()) < HOVER_STEP \
+                and abs(pos.y() - last.y()) < HOVER_STEP:
+            return
+        self._hover_tested = pos
+        palmer = self.tooth_at(pos)
+        if palmer == self._hover:
+            return
+        self._hover = palmer
+        self.setCursor(Qt.CursorShape.PointingHandCursor if palmer
+                       else Qt.CursorShape.OpenHandCursor)
+
     # ---- painting ----
 
     def paintEvent(self, event):
@@ -605,11 +878,7 @@ class ArchView3D(QWidget):
         w, h = self.width(), self.height()
         p.fillRect(0, 0, w, h, _qcolor(theme.SURFACE))
 
-        # The whole widget is the arch: the key is a bar above this widget and
-        # the toggles a column beside it, so nothing is reserved here.
-        frame = _Frame.fit(self.arch, self.camera, self.zoom, QRectF(
-            SIDE_PAD, TOP_PAD,
-            max(60, w - 2 * SIDE_PAD), max(60, h - TOP_PAD - BOTTOM_PAD)))
+        frame = self._frame()
         readings = self._pending if self._pending is not None else self._readings()
         self._pending = None
 
@@ -850,7 +1119,8 @@ class ArchView3D(QWidget):
         p.setFont(f2)
         p.setPen(_qcolor(theme.ON_SURFACE_MUTED))
         p.drawText(18, 44, f"{self.view_name()} view · drag to orbit · "
-                           "scroll to zoom · dashed = no sensor mapped")
+                           "scroll to zoom · click a tooth for its graphs · "
+                           "dashed = no sensor mapped")
 
     def _magnitude(self, palmer, vals):
         """|resultant| for one tooth -- the same vector the arrow is drawn along."""
@@ -1521,6 +1791,12 @@ class ToothGlyphPanel(QWidget):
 class ArchTab(QWidget):
     """One 3D lower arch, with camera presets and the arrow toggles above it."""
 
+    #: Relayed from `ArchView3D.tooth_picked`: a crown was clicked, and this is
+    #: the cell index behind it. A relay rather than letting the dashboard reach
+    #: into `.view` -- it touches this widget through one method today, and that
+    #: is worth keeping.
+    cell_picked = pyqtSignal(int)
+
     @staticmethod
     def _build_tooth_to_cell(tooth_per_cell):
         """Palmer designation -> cell index, for teeth on the lower arch.
@@ -1635,6 +1911,7 @@ class ArchTab(QWidget):
         self._rebuild_panel()
         self.view.preset_left.connect(
             lambda: _set_active(self.preset_buttons, None))
+        self.view.tooth_picked.connect(self.cell_picked)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._refresh)
@@ -1754,6 +2031,9 @@ class ArchTab(QWidget):
         # The parked sample was read under the old mapping; a tooth this edit
         # unmapped must not paint one last set of arrows from it.
         self.view.drop_readings()
+        # Same reasoning for the pointer: a crown this edit unmapped must not
+        # keep the pointing hand until the mouse next moves.
+        self.view.clear_hover()
         self._rebuild_panel()
         # A remapped tooth can carry a resultant flag from the last time it was
         # mapped, which changes what the key needs.
