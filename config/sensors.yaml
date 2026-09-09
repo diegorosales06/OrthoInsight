@@ -20,4 +20,3 @@ sensors:
   dev: 0
   csb_gpio: 0
   tooth: LL4
-
