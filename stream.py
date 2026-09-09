@@ -62,6 +62,11 @@ class Sensor:
             r = self._cmd([CMD_COEFF[axis]], 19)
             for k in range(6):
                 self.coeff[axis][k] = s24(r[1+k*3 : 4+k*3])
+        # NOTE: 0 disables the MMS101's automatic offset-temperature-correction
+        # refresh (INTERVAL is that cadence, not a sample rate), which freezes the
+        # correction at START and drifts without settling. Fixed in
+        # graphDash/protocol.py; left alone here -- see graphDash/constants.py
+        # TEMP_UPDATE_INTERVAL for the reasoning.
         self._cmd([CMD_INTERVAL, 0, 0, 0], 1)
         self._cmd([CMD_START], 1)
         time.sleep(0.01)

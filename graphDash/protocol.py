@@ -10,7 +10,12 @@ from graphDash import csb as csb_bank
 from graphDash.constants import (
     CMD_START, CMD_DATA2, CMD_BOOT, CMD_STOP, CMD_RESET, CMD_STATUS,
     CMD_INTERVAL, CMD_COEFF, STT_STANDBY, STT_READY, N_AXES,
+    TEMP_UPDATE_INTERVAL,
 )
+
+# DATA2 response bytes 1-2, big-endian (SDK guide 10-4-2, bit list 10-6).
+ST_NACK_MASK  = 0x003F  # b0-b5, one per axis: that AFE NACKed the Conv.BD
+ST_NOT_UPDATE = 0x0200  # b9: new data is not ready, so this frame repeats the last one
 
 
 def s24(b):
@@ -33,6 +38,13 @@ class Sensor:
         self.spi.mode = 0b11
         self.spi.max_speed_hz = 2_000_000
         self.coeff = [[0]*6 for _ in range(6)]
+        # Measure Status, decoded from every DATA2 frame. Counters only -- a stale or
+        # NACKed frame is still returned, because dropping samples here would be a new
+        # failure mode. They are what tells you whether the temperature refreshes are
+        # landing and whether any axis is dropping out.
+        self.last_status = 0
+        self.stale_count = 0
+        self.nack_count = 0
         self.spi.xfer2([0x00])
 
     def _xfer(self, tx, rx_len):
@@ -64,18 +76,27 @@ class Sensor:
             r = self._cmd([CMD_COEFF[axis]], 19)
             for k in range(6):
                 self.coeff[axis][k] = s24(r[1+k*3 : 4+k*3])
-        self._cmd([CMD_INTERVAL, 0, 0, 0], 1)
+        # Big-endian 3-byte payload (SDK guide 10-3). Must precede START, per 10-10.
+        n = TEMP_UPDATE_INTERVAL
+        self._cmd([CMD_INTERVAL, (n >> 16) & 0xFF, (n >> 8) & 0xFF, n & 0xFF], 1)
         self._cmd([CMD_START], 1)
         time.sleep(0.01)
 
     def read_all(self):
         """Returns [Fx, Fy, Fz, Mx, My, Mz] in [N, N, N, N*m, N*m, N*m]."""
         r = self._cmd([CMD_DATA2], 21)
+        self.last_status = (r[1] << 8) | r[2]
+        if self.last_status & ST_NOT_UPDATE:
+            self.stale_count += 1
+        if self.last_status & ST_NACK_MASK:
+            self.nack_count += 1
         adc = [s24(r[3+k*3 : 6+k*3]) for k in range(6)]
         out = []
         for axis in range(6):
             acc = sum(c * a for c, a in zip(self.coeff[axis], adc))
-            shifted = int(acc / 2048)
+            # >>11 per the datasheet's matrix-operation section. Not int(acc / 2048):
+            # that truncates toward zero where >> floors, a 1 LSB step across zero.
+            shifted = acc >> 11
             scale = 1000.0 if axis < 3 else 100000.0
             out.append(shifted / scale)
         return out
