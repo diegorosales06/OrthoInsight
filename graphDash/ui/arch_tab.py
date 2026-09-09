@@ -38,7 +38,7 @@ depth sort over crowns and arrows together.
 
 import math
 from dataclasses import dataclass
-from functools import partial
+from functools import lru_cache, partial
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QScrollArea, QFrame,
@@ -433,15 +433,17 @@ class ArchView3D(QWidget):
     preset_left = pyqtSignal()
 
     def __init__(self, store, tooth_to_cell: dict, scale: GlyphScale,
-                 show_resultant: bool = False, visibility=None):
+                 visibility=None):
         super().__init__()
         self.store = store
         self.tooth_to_cell = tooth_to_cell
         self.scale = scale
+        # Which glyphs each tooth shows is `GlyphVisibility`'s to say, and it is
+        # the *only* thing that says it: the view reads it, the toggle panel
+        # writes it, and there is no second way in. A setter here would let the
+        # arch and the panel's buttons disagree without either being wrong.
         self.visibility = visibility if visibility is not None \
             else GlyphVisibility()
-        if show_resultant:
-            self.set_resultant(True)
         self.arch = build_arch()
         self._tooth_by_palmer = {t.palmer: t for t in self.arch.teeth}
 
@@ -456,7 +458,12 @@ class ArchView3D(QWidget):
         self.set_preset(DEFAULT_PRESET)
 
         self._shades = _shade_table(_qcolor(theme.TOOTH_FILL))
-        self.setMinimumSize(460, 420)
+        # Deliberately small. The key and the toggles are sibling widgets now,
+        # and their heights add to the tab's minimum rather than being carved
+        # out of this pane -- so a floor sized for a comfortable arch would put
+        # the tab's minimum above the 800x480 screens the Pi runs. The arch is
+        # fit-scaled into whatever it gets.
+        self.setMinimumSize(360, 260)
         self.setCursor(Qt.CursorShape.OpenHandCursor)
 
     # ---- what the arrows mean ----
@@ -472,14 +479,6 @@ class ArchView3D(QWidget):
         its own per-tooth toggles, so switching back restores what was showing.
         """
         self.scale = scale
-        self.update()
-
-    def set_resultant(self, on: bool):
-        """Set every mapped tooth's resultant flag at once, for the quantity
-        currently showing. A no-op when that quantity has no resultant."""
-        if self.scale.resultant is not None:
-            self.visibility.set_resultant_all(
-                self.tooth_to_cell, self.scale.quantity, on)
         self.update()
 
     # ---- camera control ----
@@ -544,6 +543,16 @@ class ArchView3D(QWidget):
         """
         self._pending = self._readings()
         return self._pending
+
+    def drop_readings(self):
+        """Discard the parked sample, so the next paint reads fresh.
+
+        Needed when the tooth mapping changes under it: `_pending` is keyed by
+        Palmer designation, and while the tab is hidden nothing consumes it, so
+        a sample read under the old mapping can otherwise sit there indefinitely
+        and paint arrows for a cell that no longer exists.
+        """
+        self._pending = None
 
     def readouts(self, readings):
         """{Palmer: [(text, hex colour)]} for the toggle panel's numbers.
@@ -626,7 +635,12 @@ class ArchView3D(QWidget):
             draw = self._draw_crown if mapped else self._draw_footprint
             yield apex_depth, partial(draw, frame=frame, tooth=tooth)
 
-            vals = readings.get(tooth.palmer)
+            # `mapped`, not just `vals`: a parked reading (see take_readings)
+            # can outlive the mapping it was read under -- a live sensor-config
+            # edit rewrites `tooth_to_cell` between the read and the paint --
+            # and a glyph on a tooth this frame draws as an unmapped footprint
+            # would be an arrow with no sensor behind it.
+            vals = readings.get(tooth.palmer) if mapped else None
             if vals is not None:
                 yield from self._glyph_primitives(frame, tooth, vals, apex_depth)
 
@@ -670,8 +684,8 @@ class ArchView3D(QWidget):
 
     def _resultant_vector(self, tooth, vals):
         """The three components summed in this tooth's own frame, as a world
-        vector. Its magnitude is what the resultant arrow and the key's numeric
-        readout both report."""
+        vector. Its magnitude is what the resultant arrow and the toggle panel's
+        numeric readout both report."""
         total = (0.0, 0.0, 0.0)
         for axis, basis in zip(self.scale.axes, tooth.frame):
             total = vmad(total, basis, vals[axis.index])
@@ -838,8 +852,6 @@ class ArchView3D(QWidget):
         p.drawText(18, 44, f"{self.view_name()} view · drag to orbit · "
                            "scroll to zoom · dashed = no sensor mapped")
 
-    # ---- key column ----
-
     def _magnitude(self, palmer, vals):
         """|resultant| for one tooth -- the same vector the arrow is drawn along."""
         tooth = self._tooth_by_palmer.get(palmer)
@@ -967,9 +979,6 @@ class ArchKeyBar(QWidget):
         rows = [(heading, theme.ON_SURFACE, scale.unit_label),
                 (note, muted, f"< {scale.lo:g}: not shown"),
                 (note, muted, f"clamped at {scale.hi:g}")]
-        if self._any_resultant():
-            rows.append((note, muted, f"{scale.resultant.name} clamps at "
-                                      f"{scale.resultant.hi:g}"))
         return self._text_group(p, x, rows, measure)
 
     def _group_spec(self, p, x, measure, spec):
@@ -992,7 +1001,7 @@ class ArchKeyBar(QWidget):
                    self._adv(caption, spec.description))
 
     def _group_ramp(self, p, x, measure):
-        """What growing means: a sample glyph at `lo` and one at the clamp."""
+        """What growing means: a sample glyph at `lo` and one at each clamp."""
         scale = self.view.scale
         _, caption, _ = self._fonts()
         title = "Sweep" if scale.curl else "Length"
@@ -1003,16 +1012,23 @@ class ArchKeyBar(QWidget):
             p.drawText(int(x), int(self._line(0)), title)
         fg = _qcolor(theme.ON_SURFACE)
         glyph_w = 2 * KEY_CURL_R + 4 if scale.curl else 42
-        samples = ((scale.lo, CURL_MIN_SWEEP, 18, ARROW_MIN_W),
-                   (scale.hi, CURL_MAX_SWEEP, 38, ARROW_MAX_W))
-        for i, (value, sweep, length, width) in enumerate(samples):
+        samples = [(scale.lo, CURL_MIN_SWEEP, 18, ARROW_MIN_W, fg),
+                   (scale.hi, CURL_MAX_SWEEP, 38, ARROW_MAX_W, fg)]
+        # A resultant clamps at its own, larger ceiling, so a maximum-length
+        # arrow means one thing for a component and another for a resultant.
+        # Its own sample says which, in its own colour, rather than leaving the
+        # reader to size a purple arrow against the component ramp.
+        if self._any_resultant():
+            samples.append((scale.resultant.hi, CURL_MAX_SWEEP, 38, ARROW_MAX_W,
+                            _qcolor(scale.resultant.color)))
+        for i, (value, sweep, length, width, color) in enumerate(samples):
             y = self._line(1 + i)
             if not measure:
                 if scale.curl:
-                    _key_curl(p, x, y - 4, KEY_CURL_R, sweep, fg, width)
+                    _key_curl(p, x, y - 4, KEY_CURL_R, sweep, color, width)
                 else:
-                    _key_arrow(p, x, y - 4, length, fg, width)
-                p.setPen(fg)
+                    _key_arrow(p, x, y - 4, length, color, width)
+                p.setPen(color)
                 p.drawText(int(x + glyph_w + 6), int(y), f"{value:g}")
             widest = max(widest,
                          glyph_w + 6 + self._adv(caption, f"{value:g}"))
@@ -1057,12 +1073,31 @@ class ArchKeyBar(QWidget):
 
 TOGGLE_W = 34            # px, one axis/resultant button
 TOGGLE_H = 24
-PANEL_W = 196            # px, the whole column
-READOUT_INDENT = 41      # px, lines the numbers up under the buttons
+PANEL_ML, PANEL_MR = 10, 12   # px, the column's left/right margins
+ROW_LABEL_W = 38              # px, the Palmer designation at the start of a row
+ROW_GAP = 3                   # px, between the label and the buttons
+#: Wide enough for the label plus four buttons at their fixed size. Narrower and
+#: `setFixedWidth` wins over the layout's minimum, and QBoxLayout makes up the
+#: difference by shrinking the widgets that asked for a fixed size -- the Palmer
+#: label goes first, and QLabel clips rather than elides.
+PANEL_W = (PANEL_ML + ROW_LABEL_W + 4 * (TOGGLE_W + ROW_GAP) + PANEL_MR)
+#: The scrollbar rides inside this, so it must clear a native one (17 px on
+#: platforms that do not take the theme's 12).
+PANEL_SCROLL_W = PANEL_W + 18
+#: Three equal columns for the live numbers, so a value's x position depends on
+#: which column it is in and not on how many characters the values to its left
+#: happened to have. The old key column had a fixed 52 px pitch for the same
+#: reason; joining variable-length strings loses it even in a monospace font.
+READOUT_COL_W = (PANEL_W - PANEL_ML - PANEL_MR) // 3
 
 
+@lru_cache(maxsize=16)
 def _toggle_stylesheet(hex_color):
     """A compact checkable button that lights up in its own glyph colour.
+
+    Cached: there are four distinct glyph colours and a rowful of buttons per
+    tooth, so the same handful of strings would otherwise be rebuilt on every
+    rebuild of the panel.
 
     The colour is the point: the arch, the key, the time-series plots and this
     panel all have to agree on what colour Fy is, or the toggles stop reading as
@@ -1114,20 +1149,30 @@ class ToothGlyphPanel(QWidget):
     #: waiting out the refresh timer.
     changed = pyqtSignal()
 
+    #: Columns per row: the three components plus the resultant. The resultant
+    #: column is built in both modes and hidden in moment mode, so a DATA switch
+    #: is a re-point rather than a rebuild.
+    N_COLS = GlyphVisibility.N_AXES + 1
+
     def __init__(self, visibility: GlyphVisibility):
         super().__init__()
         self.visibility = visibility
         self.palmers = []
         self.scale = None
         # A rule down the left edge, so the toggles read as their own column
-        # rather than as part of the arch beside them.
+        # rather than as part of the arch beside them. A plain QWidget ignores a
+        # stylesheet background and border unless it is told to style itself --
+        # without this the rule is simply never painted, and the background only
+        # looks right because theme.SURFACE happens to be the window colour.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(
             f"ToothGlyphPanel {{ background: {theme.SURFACE}; "
             f"border-left: 1px solid {theme.OUTLINE}; }}")
+        self._head_labels = []        # column heads, axes then resultant
         self._axis_buttons = {}       # palmer -> [QPushButton x3]
         self._resultant_buttons = {}  # palmer -> QPushButton
         self._master_buttons = []     # the "All" row, axes then resultant
-        self._readouts = {}           # palmer -> QLabel of live values
+        self._readouts = {}           # palmer -> [QLabel x3] of live values
         self.setFixedWidth(PANEL_W)
 
         self._grid = QVBoxLayout(self)
@@ -1136,15 +1181,33 @@ class ToothGlyphPanel(QWidget):
 
     # ---- construction ----
 
-    def rebuild(self, palmers, scale: GlyphScale):
-        """Re-lay the column for this tooth list and quantity.
+    def retarget(self, scale: GlyphScale):
+        """Point the existing rows at another quantity, without rebuilding them.
 
-        Called on construction, on a DATA switch (the axis names, the stored
-        state and the resultant column all change with the quantity) and when a
-        live sensor-config edit remaps the cells.
+        A DATA switch changes the button labels, their colours, whether the
+        resultant column applies and which set of flags is showing -- but not
+        which teeth have rows or what those rows are made of. Re-pointing them is
+        a handful of `setText` calls; rebuilding is ~68 widgets and ~68 freshly
+        parsed stylesheets, which on the Pi is most of a second of frozen UI on a
+        widget otherwise held to a 50 ms frame.
+
+        Falls back to a full rebuild when there is no structure to re-point.
+        """
+        if self.scale is None or not self.palmers:
+            return self.rebuild(self.palmers, scale)
+        self.scale = scale
+        self._apply_scale()
+
+    def rebuild(self, palmers, scale: GlyphScale):
+        """Re-lay the column from scratch, for this tooth list and quantity.
+
+        Called on construction and when a live sensor-config edit remaps the
+        cells -- i.e. when the set of rows itself changes. A DATA switch goes
+        through `retarget` instead.
         """
         self.palmers = list(palmers)
         self.scale = scale
+        self._head_labels = []
         self._axis_buttons = {}
         self._resultant_buttons = {}
         self._master_buttons = []
@@ -1169,7 +1232,7 @@ class ToothGlyphPanel(QWidget):
         for palmer in self.palmers:
             self._grid.addLayout(self._tooth_row(palmer))
         self._grid.addStretch()
-        self._sync_enabled()
+        self._apply_scale()
 
     def _clear(self):
         self._clear_layout(self._grid)
@@ -1218,34 +1281,58 @@ class ToothGlyphPanel(QWidget):
             f"font-weight: {700 if bold else 600}; background: transparent;")
         return label
 
-    def _column_head(self, text, color):
-        label = QLabel(text)
+    def _column_head(self):
+        """An empty column head; `_style_head` gives it its text and colour."""
+        label = QLabel()
         label.setFixedWidth(TOGGLE_W)
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        return label
+
+    @staticmethod
+    def _style_head(label, text, color):
+        label.setText(text)
         label.setStyleSheet(
             f"font-size: {theme.FONT_CAPTION}pt; color: {color}; "
             f"font-weight: 700; background: transparent;")
-        return label
+
+    @staticmethod
+    def _set_toggle_color(btn, hex_color):
+        """Dress a toggle in a glyph colour, skipping the restyle when it
+        already wears it -- a stylesheet assignment costs a parse and a
+        polish even when the string is identical."""
+        if btn.property("glyphColor") == hex_color:
+            return
+        btn.setProperty("glyphColor", hex_color)
+        btn.setStyleSheet(_toggle_stylesheet(hex_color))
+
+    def _set_readout(self, label, text, color):
+        """One live number. The colour is a stylesheet, so it is only touched
+        when a toggle changes it -- the text changes every sample and must stay
+        a plain `setText`, not a rich-text parse."""
+        if label.property("readoutColor") != color:
+            label.setProperty("readoutColor", color)
+            label.setStyleSheet(
+                f"font-family: monospace; font-size: {theme.FONT_CAPTION}pt; "
+                f"color: {color}; background: transparent;")
+        label.setText(text)
 
     def _header_row(self):
-        """Column heads: the axis names of the quantity actually showing, so the
-        buttons say Fx/Fy/Fz in force mode and Mx/My/Mz in moment mode."""
+        """Column heads. Their text and colour are the quantity's, so they say
+        Fx/Fy/Fz in force mode and Mx/My/Mz in moment mode -- `_apply_scale`
+        fills them in, here and after a DATA switch alike."""
         row = self._row()
         row.addWidget(self._row_label("", theme.ON_SURFACE_MUTED))
-        for axis in self.scale.axes:
-            row.addWidget(self._column_head(axis.name, axis.color))
-        if self._has_resultant:
-            row.addWidget(self._column_head(self.scale.resultant.name,
-                                            self.scale.resultant.color))
+        self._head_labels = [self._column_head() for _ in range(self.N_COLS)]
+        for label in self._head_labels:
+            row.addWidget(label)
         row.addStretch()
         return row
 
-    def _button(self, text, hex_color, on_click):
-        btn = QPushButton(text)
+    def _button(self, on_click):
+        btn = QPushButton()
         btn.setCheckable(True)
         btn.setFixedSize(TOGGLE_W, TOGGLE_H)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setStyleSheet(_toggle_stylesheet(hex_color))
         btn.clicked.connect(on_click)
         return btn
 
@@ -1257,15 +1344,12 @@ class ToothGlyphPanel(QWidget):
         """
         row = self._row()
         row.addWidget(self._row_label("All", theme.ON_SURFACE_MUTED, bold=True))
-        self._master_buttons = []
-        for rank, axis in enumerate(self.scale.axes):
-            btn = self._button("●", axis.color, partial(self._toggle_all, rank))
-            self._master_buttons.append(btn)
-            row.addWidget(btn)
-        if self._has_resultant:
-            btn = self._button("●", self.scale.resultant.color,
-                               self._toggle_all_resultant)
-            self._master_buttons.append(btn)
+        self._master_buttons = [
+            self._button(partial(self._toggle_all, rank))
+            for rank in range(GlyphVisibility.N_AXES)]
+        self._master_buttons.append(self._button(self._toggle_all_resultant))
+        for btn in self._master_buttons:
+            btn.setText("●")
             row.addWidget(btn)
         row.addStretch()
         return row
@@ -1276,36 +1360,80 @@ class ToothGlyphPanel(QWidget):
         The numbers sit here rather than in the key because they are about this
         tooth, not about the notation -- and because they belong next to the
         buttons that decide which of them are on the arch.
+
+        The resultant button is built even in moment mode and hidden there,
+        which is what lets a DATA switch re-point these rows instead of
+        rebuilding them.
         """
         row = self._row()
         row.addWidget(self._row_label(palmer))
-        buttons = []
-        for rank, axis in enumerate(self.scale.axes):
-            btn = self._button(axis.name[-1].upper(), axis.color,
-                               partial(self._toggle_axis, palmer, rank))
-            buttons.append(btn)
-            row.addWidget(btn)
+        buttons = [self._button(partial(self._toggle_axis, palmer, rank))
+                   for rank in range(GlyphVisibility.N_AXES)]
         self._axis_buttons[palmer] = buttons
-        if self._has_resultant:
-            btn = self._button("R", self.scale.resultant.color,
-                               partial(self._toggle_resultant, palmer))
-            self._resultant_buttons[palmer] = btn
+        resultant = self._button(partial(self._toggle_resultant, palmer))
+        resultant.setText("R")
+        self._resultant_buttons[palmer] = resultant
+        for btn in buttons + [resultant]:
             row.addWidget(btn)
         row.addStretch()
 
-        readout = QLabel("--")
-        readout.setStyleSheet(
-            f"font-family: monospace; font-size: {theme.FONT_CAPTION}pt; "
-            f"background: transparent;")
-        readout.setContentsMargins(READOUT_INDENT, 0, 0, 0)
-        self._readouts[palmer] = readout
+        numbers = self._row()
+        numbers.setSpacing(0)
+        labels = []
+        for _ in range(GlyphVisibility.N_AXES):
+            label = QLabel("--")
+            label.setFixedWidth(READOUT_COL_W)
+            labels.append(label)
+            numbers.addWidget(label)
+        numbers.addStretch()
+        self._readouts[palmer] = labels
 
         cell = QVBoxLayout()
         cell.setContentsMargins(0, 0, 0, 0)
         cell.setSpacing(1)
         cell.addLayout(row)
-        cell.addWidget(readout)
+        cell.addLayout(numbers)
         return cell
+
+    # ---- the quantity showing ----
+
+    def _apply_scale(self):
+        """Point every built widget at `self.scale`.
+
+        The one place the axis names, the glyph colours and the resultant
+        column's applicability reach the widgets -- so `rebuild` and `retarget`
+        end up in exactly the same state.
+        """
+        specs = list(self.scale.axes)
+        if self._has_resultant:
+            specs.append(self.scale.resultant)
+        for i, label in enumerate(self._head_labels):
+            spec = specs[i] if i < len(specs) else None
+            label.setVisible(spec is not None)
+            self._style_head(label, spec.name if spec else "",
+                             spec.color if spec else theme.ON_SURFACE_MUTED)
+        for rank, btn in enumerate(self._master_buttons):
+            self._retarget_button(btn, specs, rank, "●")
+        for palmer, buttons in self._axis_buttons.items():
+            for rank, btn in enumerate(buttons):
+                self._retarget_button(btn, specs, rank,
+                                      self.scale.axes[rank].name[-1].upper())
+            self._retarget_button(self._resultant_buttons[palmer], specs,
+                                  GlyphVisibility.N_AXES, "R")
+        for labels in self._readouts.values():
+            for label in labels:
+                self._set_readout(label, "--", theme.ON_SURFACE_SUBTLE)
+        self._sync_enabled()
+
+    def _retarget_button(self, btn, specs, rank, text):
+        """A toggle in the rank-th column: shown only when that column applies,
+        wearing that column's glyph colour."""
+        spec = specs[rank] if rank < len(specs) else None
+        btn.setVisible(spec is not None)
+        if spec is None:
+            return
+        btn.setText(text)
+        self._set_toggle_color(btn, spec.color)
 
     # ---- state <-> buttons ----
 
@@ -1314,7 +1442,10 @@ class ToothGlyphPanel(QWidget):
 
         A tooth showing its resultant draws *only* that, so its three component
         buttons grey out rather than sitting there checked and lying about what
-        is on the arch.
+        is on the arch. The master row answers for the teeth those buttons are
+        live on and no others -- a row of teeth that are all on their resultants
+        has no component axes on the arch, so its master buttons say so and go
+        dead rather than writing through controls the user cannot see.
         """
         quantity = self.scale.quantity
         vis = self.visibility
@@ -1323,28 +1454,40 @@ class ToothGlyphPanel(QWidget):
             for rank, btn in enumerate(buttons):
                 btn.setChecked(vis.axis(palmer, quantity, rank))
                 btn.setEnabled(not resultant)
-            btn = self._resultant_buttons.get(palmer)
-            if btn is not None:
-                btn.setChecked(resultant)
+            self._resultant_buttons[palmer].setChecked(resultant)
+        component = self._component_palmers()
         for rank, btn in enumerate(self._master_buttons):
-            if rank < len(self.scale.axes):
-                btn.setChecked(vis.all_axis(self.palmers, quantity, rank))
+            if rank < GlyphVisibility.N_AXES:
+                btn.setEnabled(bool(component))
+                btn.setChecked(bool(component)
+                               and vis.all_axis(component, quantity, rank))
             else:
-                btn.setChecked(all(vis.resultant(p, quantity)
-                                   for p in self.palmers))
+                btn.setChecked(bool(self.palmers)
+                               and all(vis.resultant(p, quantity)
+                                       for p in self.palmers))
+
+    def _component_palmers(self):
+        """The teeth whose component toggles are live -- i.e. not the ones
+        currently superseded by their own resultant."""
+        quantity = self.scale.quantity
+        return [p for p in self.palmers
+                if not (self._has_resultant
+                        and self.visibility.resultant(p, quantity))]
 
     def set_readouts(self, readouts):
         """Print one frame's numbers, from `ArchView3D.readouts()`.
 
         Each entry is already (text, colour) -- the view resolved which axes are
         showing and whether the tooth is on its resultant, so this only has to
-        set the label.
+        set the labels. A tooth on its resultant has one number, not three, so
+        the columns it does not use are blanked rather than left stale.
         """
-        for palmer, label in self._readouts.items():
+        for palmer, labels in self._readouts.items():
             parts = readouts.get(palmer) or [("--", theme.ON_SURFACE_SUBTLE)]
-            label.setText("&nbsp;".join(
-                f'<span style="color:{color}">{text}</span>'
-                for text, color in parts))
+            for i, label in enumerate(labels):
+                text, color = parts[i] if i < len(parts) \
+                    else ("", theme.ON_SURFACE_SUBTLE)
+                self._set_readout(label, text, color)
 
     def _emit(self):
         self._sync_enabled()
@@ -1360,8 +1503,11 @@ class ToothGlyphPanel(QWidget):
 
     def _toggle_all(self, rank, _checked):
         quantity = self.scale.quantity
-        on = not self.visibility.all_axis(self.palmers, quantity, rank)
-        self.visibility.set_axis_all(self.palmers, quantity, rank, on)
+        palmers = self._component_palmers()
+        if not palmers:
+            return
+        on = not self.visibility.all_axis(palmers, quantity, rank)
+        self.visibility.set_axis_all(palmers, quantity, rank, on)
         self._emit()
 
     def _toggle_all_resultant(self, _checked):
@@ -1403,8 +1549,11 @@ class ArchTab(QWidget):
         self.panel = ToothGlyphPanel(self.visibility)
         self.key = ArchKeyBar(self.view)
         self.panel.changed.connect(self.view.update)
-        # A tooth switching to its resultant adds a row and a ceiling to the key.
-        self.panel.changed.connect(self.key.update)
+        # A tooth switching to its resultant adds a legend group and a ceiling
+        # to the key, so the key both needs repainting and may no longer fit
+        # where it is -- and a key that has quietly dropped a group is exactly
+        # what the measured placement exists to prevent.
+        self.panel.changed.connect(self._key_content_changed)
 
         # Two rows, not one: all the buttons side by side would put the tab's
         # minimum width near 1000 px, wider than the small screens the Pi runs.
@@ -1456,6 +1605,7 @@ class ArchTab(QWidget):
         self._top_row.addLayout(controls)
         self._strip_col.addLayout(self._top_row)
         self._key_beside = None
+        self._key_width = None
         self._place_key()
 
         # The panel scrolls: a fully instrumented arch is sixteen rows, more
@@ -1464,7 +1614,7 @@ class ArchTab(QWidget):
         scroller.setWidget(self.panel)
         scroller.setWidgetResizable(True)
         scroller.setFrameShape(QFrame.Shape.NoFrame)
-        scroller.setFixedWidth(PANEL_W + 14)
+        scroller.setFixedWidth(PANEL_SCROLL_W)
         scroller.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
@@ -1514,29 +1664,55 @@ class ArchTab(QWidget):
 
     def _pick_data(self, index):
         """Force <-> moment. The camera is unaffected, and each quantity keeps
-        its own per-tooth toggles -- so the panel is rebuilt against the new
-        scale rather than carrying the old one's state across."""
+        its own per-tooth toggles -- so the panel is re-pointed at the new scale
+        rather than carrying the old one's state across."""
         self.view.set_scale(DATA_SCALES[index])
         _set_active(self.data_buttons, index)
-        self._rebuild_panel()
-        self._place_key()
-        self.key.update()
+        self.panel.retarget(self.view.scale)
+        self._push_readouts()
+        self._key_content_changed()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._place_key()
 
+    def _key_content_changed(self):
+        """The key's content changed, so what it needs may have too."""
+        self._key_width = None
+        self._place_key()
+        self.key.update()
+
+    def _key_needs(self):
+        """`ArchKeyBar.preferred_width()`, cached.
+
+        The measure pass walks every group with its own QFontMetrics, which is
+        ~1 ms on the Pi -- affordable when the answer changes, wasteful on every
+        step of a window drag, where it is constant. Only a scale switch, a
+        resultant toggle or a config edit can move it, and each invalidates.
+        """
+        if self._key_width is None:
+            self._key_width = self.key.preferred_width()
+        return self._key_width
+
     def _place_key(self):
         """Beside the buttons if the key fits there, on its own row if not.
 
-        The key wants ~840 px in force mode. Beside the buttons it only gets the
-        tab's width less the button column, which on the small screens the Pi
-        runs is not enough -- and a key that has quietly dropped `Fz` is worse
-        than one that took a second row. So the choice is measured, not a
+        The key wants ~740 px in force mode, ~845 once a tooth is on its
+        resultant. Beside the buttons it only gets the tab's width less the
+        button column and the gap between them, which on the small screens the
+        Pi runs is not enough -- and a key that has quietly dropped `Fz` is
+        worse than one that took a second row. So the choice is measured, not a
         breakpoint: `preferred_width()` says what it needs, and it moves.
+
+        The gap is part of the sum: leaving it out claims a fit at widths where
+        the key is then handed `spacing` px less than it asked for and silently
+        truncates -- the very outcome being measured against.
         """
-        beside = (self.width() - self._controls.sizeHint().width()
-                  >= self.key.preferred_width())
+        available = (self.width() - self._controls.sizeHint().width()
+                     - self._top_row.spacing()
+                     - self._strip_col.contentsMargins().left()
+                     - self._strip_col.contentsMargins().right())
+        beside = available >= self._key_needs()
         if beside == self._key_beside:
             return
         self._key_beside = beside
@@ -1555,6 +1731,14 @@ class ArchTab(QWidget):
         """
         palmers = sorted(self.view.tooth_to_cell, key=LOWER_ARCH_ORDER.index)
         self.panel.rebuild(palmers, self.view.scale)
+        self._push_readouts()
+
+    def _push_readouts(self):
+        """Fill the panel's numbers now, rather than leaving a column of `--`
+        until the next timer tick. A rebuild or a re-point resets them to their
+        placeholder while the arch beside them is already painting the new
+        quantity."""
+        self.panel.set_readouts(self.view.readouts(self.view.take_readings()))
 
     def _reset(self):
         """Camera only -- which data the arrows show is a separate choice."""
@@ -1567,8 +1751,13 @@ class ArchTab(QWidget):
         DataStore, which already holds post-tare, post-compensation readings."""
         self.tooth_per_cell = list(tooth_per_cell or [])
         self.view.tooth_to_cell = self._build_tooth_to_cell(self.tooth_per_cell)
+        # The parked sample was read under the old mapping; a tooth this edit
+        # unmapped must not paint one last set of arrows from it.
+        self.view.drop_readings()
         self._rebuild_panel()
-        self.key.update()
+        # A remapped tooth can carry a resultant flag from the last time it was
+        # mapped, which changes what the key needs.
+        self._key_content_changed()
         self.view.update()
 
     def _refresh(self):

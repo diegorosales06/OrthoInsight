@@ -82,11 +82,21 @@ self._cmd([CMD_INTERVAL, (n >> 16) & 0xFF, (n >> 8) & 0xFF, n & 0xFF], 1)
 
 On the wire that is `0x44 0x00 0x27 0x10`.
 
-**On the units of N.** The guide says "after data is acquired N times" without naming the
-counter. The inference is that it counts the Conv.BD's own 1 ms acquisitions rather than
-host `DATA2` reads: the documented range `0~10,000,000` is ~2.8 hours at 1 ms — a sensible
-ceiling — versus ~5.8 days at our 20 Hz. So `10_000` ≈ a refresh every 10 seconds. **This
-is an inference, not a measured fact** — see the verification section.
+**On the units of N.** It is a count, not a time — and it counts the Conv.BD's own 1 ms
+polls of the sensor, *not* our `DATA2` reads. The guide's own sequence diagram (§10-10)
+distinguishes the two: the Conv.BD → MMS101 transaction is labelled *"Request of data
+acquisition"* and annotated **1 ms interval**, while the host side is *"DATA2 Command (any
+timing) → Output the latest saved data"*. We only read what the board last latched, so we
+never advance the counter. The documented range `0~10,000,000` agrees — ~2.8 hours at 1 ms,
+a sensible ceiling, versus a nonsensical ~5.8 days at our 20 Hz.
+
+So `10_000` ≈ a refresh every **10 seconds**, and it stays 10 seconds regardless of what
+the sample-rate spinbox is set to.
+
+**This is still an inference from the documentation, not a measured fact.** If the counter
+turns out to be host reads after all, `10_000` would mean ~8.3 minutes at 20 Hz — far too
+slow to hold the correction, and the refresh period would silently change with the UI rate.
+See the verification section for the check that settles it.
 
 Each refresh costs ~7.5 ms during which the AFE re-runs TempADC and its settling filter
 (datasheet p.15), so `DATA2` returns a held value for ~7–8 device samples and then steps to

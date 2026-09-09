@@ -16,9 +16,15 @@ STT_STANDBY, STT_READY = 1, 3
 # grows and never comes back -- drift that never settles. Mitsumi's reference flow
 # (SDK guide 10-10) sets INTERVAL before START for exactly this reason.
 #
-# Units: the guide says "after data is acquired N times" without naming the counter, but
-# the documented range 0~10,000,000 is ~2.8 h at the device's 1 ms cadence and ~5.8 days
-# at our 20 Hz host reads, so it counts device acquisitions. 10_000 ~= every 10 s.
+# Units: N counts the Conv.BD's own 1 ms polls of the sensor, NOT our DATA2 reads. The
+# guide's sequence diagram (10-10) uses "data acquisition" for the Conv.BD -> MMS101
+# transaction it marks "1ms interval", while the host side is labelled "DATA2 Command
+# (any timing) -> Output the latest saved data" -- we only read what the board last
+# latched, so we never advance the counter. The documented range 0~10,000,000 agrees:
+# ~2.8 h at 1 ms, versus a nonsensical 5.8 days at our 20 Hz. So 10_000 ~= every 10 s,
+# and it stays 10 s whatever the sample-rate spinbox is set to. (If this turns out to
+# count host reads after all, 10_000 would mean ~8.3 min at 20 Hz -- far too slow, and
+# coupled to the UI rate. tests: watch the plateau spacing, see DRIFT_FIX.md.)
 # Each refresh costs ~7.5 ms of held-over data while the AFE re-runs TempADC and its
 # settling filter, so don't set this so low that those plateaus dominate.
 TEMP_UPDATE_INTERVAL = 10_000

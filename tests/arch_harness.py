@@ -69,25 +69,56 @@ def app():
     return _APP
 
 
-def build_view(store=None, tooth_to_cell=None, scale=None, show_resultant=False,
+def build_view(store=None, tooth_to_cell=None, scale=None, resultant=False,
                size=(900, 620)):
     """An `ArchView3D` sized and ready to `grab()`.
 
     `tooth_to_cell` defaults to the three teeth `config/sensors.yaml` maps
     (LR7, LR2, LR5), so the harness renders the same mix of mapped crowns and
     unmapped footprints the real rig shows.
+
+    `resultant=True` puts every mapped tooth on its resultant, by writing the
+    same `GlyphVisibility` the toggle panel writes -- there is no second way to
+    set it, so a harness view and a clicked-on one cannot diverge. It raises
+    rather than quietly rendering components when the scale has no resultant,
+    because a sheet named "resultant" that shows components is a lie.
     """
     app()
-    from graphDash.ui.arch_tab import ArchView3D, FORCE_GLYPH
+    from graphDash.ui.arch_tab import ArchView3D, FORCE_GLYPH, GlyphVisibility
+
+    scale = FORCE_GLYPH if scale is None else scale
+    tooth_to_cell = {'LR7': 0, 'LR2': 1, 'LR5': 2} \
+        if tooth_to_cell is None else tooth_to_cell
+    visibility = GlyphVisibility()
+    if resultant:
+        if scale.resultant is None:
+            raise ValueError(f"{scale.quantity} has no resultant to show")
+        visibility.set_resultant_all(tooth_to_cell, scale.quantity, True)
 
     view = ArchView3D(
         store if store is not None else StubStore(),
-        {'LR7': 0, 'LR2': 1, 'LR5': 2} if tooth_to_cell is None else tooth_to_cell,
-        scale=FORCE_GLYPH if scale is None else scale,
-        show_resultant=show_resultant,
+        tooth_to_cell,
+        scale=scale,
+        visibility=visibility,
     )
     view.resize(*size)
     return view
+
+
+def set_all_resultant(view, on):
+    """Put every mapped tooth of an existing view on (or off) its resultant.
+
+    The sheets and the benchmark reuse one view across scales, so they need to
+    flip this between passes. It goes through `GlyphVisibility` -- the one thing
+    that decides which glyphs a tooth shows -- rather than a setter on the view,
+    so what the harness renders is reachable by clicking.
+    """
+    scale = view.scale
+    if scale.resultant is None:
+        if on:
+            raise ValueError(f"{scale.quantity} has no resultant to show")
+        return
+    view.visibility.set_resultant_all(view.tooth_to_cell, scale.quantity, on)
 
 
 def build_tab(store=None, tooth_per_cell=None, scale=None, size=(1160, 640)):

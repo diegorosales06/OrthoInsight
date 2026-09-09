@@ -11,6 +11,21 @@ Exits non-zero when the mean frame time exceeds `REFRESH_MS`, the interval
 `ArchTab`'s timer repaints at: past that the view cannot keep its own schedule.
 The p95 matters as much as the mean -- a sort that occasionally goes quadratic
 shows up there first.
+
+Two things are timed, and the gate is the worse of them:
+
+* the **arch alone**, which is what `--scaling` fits a line through and what the
+  bake budget trades against;
+* the **whole tab** -- one `_refresh()` plus a repaint of the arch, the key bar
+  and the toggle column -- which is what the timer actually drives. The key and
+  the numbers used to be painted inside the view and were covered by the first
+  figure for free; they are sibling widgets now, so timing only the view would
+  let the gate pass while the tab misses frames.
+
+Note for anyone comparing against numbers taken before the chrome moved out of
+the view: the arch used to be clipped to `width - 204` and now gets the whole
+widget, so at the same `--size` it rasterises a wider arch. Pi measurements
+taken before that change are not comparable and must be redone.
 """
 
 import argparse
@@ -24,7 +39,7 @@ import arch_harness as harness           # sets QT_QPA_PLATFORM, fixes sys.path
 
 from graphDash.constants import REFRESH_MS
 from graphDash.ui.arch_model import LOWER_ARCH_ORDER
-from graphDash.ui.arch_tab import DATA_SCALES, PRESETS
+from graphDash.ui.arch_tab import DATA_SCALES, PANEL_SCROLL_W, PRESETS
 
 # How many teeth to map when measuring the slope. Real rigs instrument a few
 # teeth, but the cost per triangle is what sets the bake budget, so the sweep
@@ -55,13 +70,48 @@ def time_frames(view, frames):
     return out
 
 
+def time_tab_ticks(tab, frames):
+    """Milliseconds per whole-tab tick: one `_refresh()` plus one repaint.
+
+    `_refresh` is what the timer calls -- it reads the store once, prints the
+    numbers into the toggle panel and schedules the arch's paint -- so this is
+    the figure `REFRESH_MS` is actually the budget for.
+    """
+    tab._refresh()
+    tab.grab()
+    out = []
+    for _ in range(frames):
+        t0 = time.perf_counter()
+        tab._refresh()
+        tab.grab()
+        out.append((time.perf_counter() - t0) * 1000.0)
+    return out
+
+
+def tab_rows(frames, size, cases):
+    """Time the whole tab for each (label, tooth list) case, both quantities."""
+    rows = []
+    for label, palmers in cases:
+        store = harness.StubStore(
+            {i: list(harness.STUB_READINGS[i % len(harness.STUB_READINGS)])
+             for i in range(len(palmers))})
+        tab = harness.build_tab(store=store, tooth_per_cell=palmers, size=size)
+        for i, scale in enumerate(DATA_SCALES):
+            tab._pick_data(i)
+            ms = sorted(time_tab_ticks(tab, frames))
+            rows.append((f"tab {label}/{scale.quantity}", "Oblique",
+                         sum(ms) / len(ms), percentile(ms, 0.95), ms[-1]))
+        tab.deleteLater()
+    return rows
+
+
 def scaling(frames, size):
     """Cost per triangle, and the triangle budget that fits one frame.
 
     Renders the arch with a growing number of teeth mapped and fits a line
     through the results. The intercept is everything that costs the same however
-    much geometry there is -- key column, labels, footprints, the grab itself --
-    and the slope is what the bake budget actually trades against.
+    much geometry there is -- the guide, the labels, the unmapped footprints, the
+    grab itself -- and the slope is what the bake budget actually trades against.
 
     Run this on the Pi 4 and hand the reported budget to
     `tools/bake_arch_mesh.py --budget`.
@@ -131,7 +181,7 @@ def main():
         for resultant in ((False, True) if scale.resultant is not None
                           else (False,)):
             view.set_scale(scale)
-            view.set_resultant(resultant)
+            harness.set_all_resultant(view, resultant)
             for pi, (name, _, _) in enumerate(PRESETS):
                 view.set_preset(pi)
                 ms = sorted(time_frames(view, args.frames))
@@ -141,6 +191,14 @@ def main():
                     f"{scale.quantity}/{'Resultant' if resultant else 'Components'}",
                     name, mean, percentile(ms, 0.95), ms[-1],
                 ))
+
+    # The whole tab, at the rig's three cells and at a fully instrumented arch.
+    # The tab is wider than the view alone: it carries the toggle column beside
+    # the arch and the key bar above it.
+    rows += tab_rows(args.frames, (w + PANEL_SCROLL_W, h + 90),
+                     (("3 teeth", ["LR7", "LR2", "LR5"]),
+                      ("16 teeth", list(LOWER_ARCH_ORDER))))
+    worst_mean = max([worst_mean] + [r[2] for r in rows])
 
     print(f"\n{'case':28} {'view':10} {'mean':>9} {'p95':>9} {'max':>9}")
     print("-" * 100)

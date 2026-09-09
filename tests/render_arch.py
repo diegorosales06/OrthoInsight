@@ -4,7 +4,7 @@
     QT_QPA_PLATFORM=offscreen python3 tests/render_arch.py --out /tmp/arch_after
     python3 tests/render_arch.py --diff /tmp/arch_before /tmp/arch_after
 
-Four things it produces:
+Five things it produces:
 
 * `presets_*.png`  -- one image per (data, show, camera preset) combination.
   Only force has a resultant, so moment contributes component images only.
@@ -55,7 +55,7 @@ def render_presets(out_dir, size):
         modes = (False, True) if scale.resultant is not None else (False,)
         for resultant in modes:
             view.set_scale(scale)
-            view.set_resultant(resultant)
+            harness.set_all_resultant(view, resultant)
             for pi, (name, _, _) in enumerate(PRESETS):
                 view.set_preset(pi)
                 tag = f"{scale.quantity}_{'resultant' if resultant else 'components'}_{name}"
