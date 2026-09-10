@@ -53,12 +53,15 @@ from graphDash.ui.arch_model import LOWER_ARCH_ORDER, TOOTH_TYPE, normalize_toot
 # and translated, because a scanner rarely asks which notation you prefer.
 # The scheme is detected across the whole filename set, never per file.
 FDI_TO_PALMER = {
-    38: 'LL8', 37: 'LL7', 36: 'LL6', 35: 'LL5',
-    34: 'LL4', 33: 'LL3', 32: 'LL2', 31: 'LL1',
+    38: 'LL1', 37: 'LL2', 36: 'LL3', 35: 'LL4',
+    34: 'LL5', 33: 'LL6', 32: 'LL7', 31: 'LL8',
     41: 'LR1', 42: 'LR2', 43: 'LR3', 44: 'LR4',
     45: 'LR5', 46: 'LR6', 47: 'LR7', 48: 'LR8',
 }
+
 UNIVERSAL_RANGE = range(17, 33)
+APEX_DROP = 0.11  # arch units; increase to move the apex lower
+
 
 # Teeth that anchor the orientation. Molars sit posterior, incisors anterior;
 # LR8 and LL8 are the two ends of the arch, so their difference is the x axis.
@@ -369,7 +372,7 @@ def build_teeth(meshes, budget, curve, unit, label_gap):
         if up.any():
             patch = v[np.unique(f[up])]
             apex = (float(patch[:, 0].mean()), float(patch[:, 1].mean()),
-                    float(patch[:, 2].max()))
+                    float(patch[:, 2].max()) - APEX_DROP)
         else:
             apex = (cx, cy, float(v[:, 2].max()))
 

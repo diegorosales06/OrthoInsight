@@ -33,7 +33,7 @@ def split_stl(input_stl, output_dir):
 
 
 if __name__ == "__main__":
-    input_stl = r"C:\Users\5035977\Downloads\LOWER_CROWNS_T1.stl"
+    input_stl = r"C:\Users\5035977\Downloads\UPPER_CROWNS_T1.stl"
     output_dir = r"C:\Users\5035977\Downloads\crownMeshes"
 
     split_stl(input_stl, output_dir)

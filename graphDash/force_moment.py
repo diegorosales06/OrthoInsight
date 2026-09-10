@@ -161,5 +161,7 @@ def compute_adjusted(raw, tooth_type, pos_vectors):
 
     # print(f"{fxo=}, {fyo=}, {fzo=}, {mxo=}, {myo=}, {mzo=}")
     #print(f"{fx=}, {fy=}, {fz=}, {mx=}, {my=}, {mz=}")
+
+    print(f"{fxo=}, {fyo=}")
     mx, my, mz = mx*1000, my*1000, mz*1000
     return [fx, fy, fz, mx, my, mz]

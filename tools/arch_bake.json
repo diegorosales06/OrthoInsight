@@ -17,3 +17,4 @@
   "_scale": "Scan-units-to-world scale. Leave null to normalise the arch to the extent the view is tuned for; set it only to pin a bake against an earlier one.",
   "scale": null
 }
+

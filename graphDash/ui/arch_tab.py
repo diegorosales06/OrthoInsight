@@ -856,7 +856,7 @@ class ArchView3D(QWidget):
         readings = self._pending if self._pending is not None else self._readings()
         self._pending = None
 
-        self._draw_guide(p, frame)
+        # self._draw_guide(p, frame)
         for _, paint in sorted(self._primitives(frame, readings),
                                key=lambda prim: -prim[0]):
             paint(p)
